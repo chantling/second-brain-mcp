@@ -22,7 +22,7 @@ class MetadataExtractor:
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
-                timeout=90,  # Increased from 30 to 90 seconds for API reliability
+                timeout=150,  # Increased from 90 to 150 seconds for API reliability
                 max_retries=3
             )
         except ImportError:
