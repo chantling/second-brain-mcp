@@ -1,12 +1,17 @@
 import os
 import sys
 import uuid
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 # Debug flag - set to True to enable debug output
-DEBUG = False
+DEBUG = True
+
+# Local cache file for folder embeddings
+EMBEDDINGS_CACHE_FILE = "!Folder_Embeddings.md"
+CACHE_VALIDITY_DAYS = 7  # Refresh cache after 7 days
 
 class ObsidianManager:
     """
@@ -370,8 +375,9 @@ class ObsidianManager:
     
     async def sync_folders_to_database(self) -> Dict:
         """
-        Sync all folders to the database with embeddings.
+        Sync all folders to database with embeddings.
         This should be called on server startup.
+        Also saves folder embeddings to local cache.
         
         Returns: Sync statistics
         """
@@ -413,6 +419,31 @@ class ObsidianManager:
             print(f"[INFO] Folder sync complete: {stats['created']} created, {stats['updated']} updated", file=sys.stderr)
             if stats['errors']:
                 print(f"[WARNING] Errors during sync: {len(stats['errors'])}", file=sys.stderr)
+            
+            # Save embeddings to local cache
+            print("[INFO] Saving folder embeddings to local cache...", file=sys.stderr)
+            folder_cache = {}
+            for folder_data in folders_data:
+                path = folder_data["path"]
+                # Fetch embedding from database
+                try:
+                    response = self.db_manager.client.table("folders").select(
+                        "path, embedding"
+                    ).eq("path", path).execute()
+                    
+                    if response.data and response.data[0].get('embedding'):
+                        embedding = response.data[0]['embedding']
+                        if isinstance(embedding, str):
+                            import ast
+                            embedding = ast.literal_eval(embedding)
+                        folder_cache[path] = embedding
+                except Exception as e:
+                    if DEBUG:
+                        print(f"[DEBUG] Failed to fetch embedding for {path}: {e}", file=sys.stderr)
+            
+            self._save_folder_embeddings_cache(folder_cache)
+            print(f"[INFO] Saved {len(folder_cache)} folder embeddings to local cache", file=sys.stderr)
+            
             self._folders_synced = True
             return stats
         else:
@@ -471,8 +502,14 @@ class ObsidianManager:
     
     async def _find_semantic_folder_match(self, content: str, metadata: Dict) -> Tuple[str, float]:
         """
-        Find the best folder using semantic search with embeddings.
-        This is a synchronous wrapper that returns a cached result or default.
+        Find the best folder using hierarchical semantic search with embeddings.
+        
+        Strategy:
+        1. Start with top-level folders and find closest match
+        2. Navigate down through subfolders iteratively
+        3. Continue until reaching a leaf folder (no subfolders)
+        
+        Uses local cache for folder embeddings when available.
         
         Returns: (folder_path, confidence_score)
         """
@@ -481,6 +518,10 @@ class ObsidianManager:
             return self._find_semantic_match(content, metadata.get("topics", []))
         
         try:
+            # Try to use cached folder embeddings first
+            folder_cache = self._load_folder_embeddings_cache()
+            folders_by_level = self._organize_folders_by_level()
+            
             # Import here to avoid circular dependency
             from embeddings import EmbeddingManager
             embedding_manager = EmbeddingManager()
@@ -488,31 +529,288 @@ class ObsidianManager:
             # Create embedding for the note content
             note_embedding = await embedding_manager.create_embedding(content)
             
-            # Search for similar folders
-            similar_folders = await self.db_manager.search_folders_by_embedding(
-                note_embedding, 
-                limit=3
-            )
+            # Start hierarchical search from top level
+            current_folder = None
+            current_level = 0
+            overall_confidence = 1.0
+            
+            if DEBUG:
+                print(f"[DEBUG] Starting hierarchical folder search for content length: {len(content)}", file=sys.stderr)
+            
+            # Iterate through hierarchy levels
+            while True:
+                # Get folders at current level
+                level_folders = folders_by_level.get(current_level, [])
+                
+                # If no folders at this level, we're done
+                if not level_folders:
+                    break
+                
+                # If we have a current folder, only look at its subfolders
+                if current_folder:
+                    # Filter folders that are direct children of current_folder
+                    child_folders = [f for f in level_folders 
+                                 if f.startswith(current_folder + "/")]
+                    search_folders = child_folders
+                    
+                    if DEBUG:
+                        print(f"[DEBUG] Level {current_level}: Found {len(child_folders)} subfolders under {current_folder}", file=sys.stderr)
+                else:
+                    # Top level - use all folders
+                    search_folders = [f for f in level_folders if "/" not in f]
+                    
+                    if DEBUG:
+                        print(f"[DEBUG] Level {current_level}: Searching {len(search_folders)} top-level folders", file=sys.stderr)
+                
+                # If no subfolders found, we've reached a leaf
+                if not search_folders:
+                    break
+                
+                # Find best match at this level
+                best_folder_at_level, confidence = await self._find_best_match_at_level(
+                    note_embedding, 
+                    search_folders, 
+                    folder_cache,
+                    embedding_manager
+                )
+                
+                if DEBUG:
+                    print(f"[DEBUG] Level {current_level}: Best match = {best_folder_at_level} (confidence: {confidence:.4f})", file=sys.stderr)
+                
+                # Check if confidence is good enough to proceed
+                if confidence < 0.6:
+                    # Low confidence - stop here
+                    break
+                
+                # Update current folder and confidence
+                current_folder = best_folder_at_level
+                overall_confidence *= confidence
+                current_level += 1
+                
+                # Safety limit - don't go too deep
+                if current_level >= 10:
+                    print("[WARNING] Reached maximum folder depth, stopping", file=sys.stderr)
+                    break
             
             await embedding_manager.close()
             
-            if similar_folders and len(similar_folders) > 0:
-                best_folder = similar_folders[0]
-                similarity = best_folder.get('similarity', 0.0)
+            # Return the final folder found
+            if current_folder:
+                # Calculate overall confidence (product of all level confidences)
+                final_confidence = max(0.0, min(1.0, overall_confidence))
                 
-                # Convert similarity to confidence (lower distance = higher confidence)
-                # Cosine distance: 0 = identical, 2 = opposite
-                # We'll convert: confidence = 1.0 - (similarity / 2)
-                confidence = max(0.0, min(1.0, 1.0 - (similarity / 2)))
+                if DEBUG:
+                    print(f"[DEBUG] Final folder: {current_folder} (overall confidence: {final_confidence:.4f})", file=sys.stderr)
                 
-                # Only use if confidence is above threshold
-                if confidence >= 0.6:
-                    return (best_folder['path'], confidence)
-            
-            # If no good match found, fallback to local matching
-            return self._find_semantic_match(content, metadata.get("topics", []))
+                return (current_folder, final_confidence)
+            else:
+                # Fallback to local matching
+                return self._find_semantic_match(content, metadata.get("topics", []))
             
         except Exception as e:
-            print(f"[WARNING] Semantic folder search failed: {e}", file=sys.stderr)
+            print(f"[WARNING] Hierarchical semantic folder search failed: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
             # Fallback to local matching
             return self._find_semantic_match(content, metadata.get("topics", []))
+    
+    def _organize_folders_by_level(self) -> Dict[int, List[str]]:
+        """
+        Organize all folders by their depth level in the hierarchy.
+        
+        Returns: Dict mapping level -> list of folder paths
+        """
+        folders_by_level = {}
+        
+        for folder in self.all_folders:
+            rel_path = str(folder.relative_to(self.vault_path))
+            parts = rel_path.split('/')
+            level = len(parts) - 1  # 0-based level
+            
+            if level not in folders_by_level:
+                folders_by_level[level] = []
+            folders_by_level[level].append(rel_path)
+        
+        return folders_by_level
+    
+    async def _find_best_match_at_level(
+        self, 
+        note_embedding: List[float], 
+        folder_paths: List[str],
+        folder_cache: Dict[str, List[float]],
+        embedding_manager
+    ) -> Tuple[str, float]:
+        """
+        Find the best matching folder at a specific level.
+        
+        Args:
+            note_embedding: Embedding vector for the note
+            folder_paths: List of folder paths at this level
+            folder_cache: Cached embeddings dict {path: embedding}
+            embedding_manager: EmbeddingManager instance for generating new embeddings
+        
+        Returns: (best_folder_path, confidence_score)
+        """
+        import numpy as np
+        note_array = np.array(note_embedding, dtype=np.float64)
+        
+        best_folder = folder_paths[0]
+        best_similarity = -1.0
+        
+        # Calculate similarity for each folder
+        for folder_path in folder_paths:
+            folder_embedding = None
+            
+            # Try to get from cache
+            if folder_path in folder_cache:
+                folder_embedding = folder_cache[folder_path]
+                if DEBUG:
+                    print(f"[DEBUG] Using cached embedding for {folder_path}", file=sys.stderr)
+            
+            # If not in cache or cache needs refresh, fetch from database
+            if folder_embedding is None and self.db_manager and self._folders_synced:
+                try:
+                    # Fetch folder from database
+                    response = self.db_manager.client.table("folders").select(
+                        "path, embedding"
+                    ).eq("path", folder_path).execute()
+                    
+                    if response.data and response.data[0].get('embedding'):
+                        embedding_data = response.data[0]['embedding']
+                        if isinstance(embedding_data, str):
+                            import ast
+                            embedding_data = ast.literal_eval(embedding_data)
+                        folder_embedding = embedding_data
+                        
+                        # Update cache
+                        folder_cache[folder_path] = folder_embedding
+                        self._save_folder_embeddings_cache(folder_cache)
+                        
+                        if DEBUG:
+                            print(f"[DEBUG] Fetched and cached embedding for {folder_path}", file=sys.stderr)
+                except Exception as e:
+                    if DEBUG:
+                        print(f"[DEBUG] Failed to fetch embedding for {folder_path}: {e}", file=sys.stderr)
+            
+            # If still no embedding, skip this folder
+            if folder_embedding is None:
+                if DEBUG:
+                    print(f"[DEBUG] No embedding available for {folder_path}, skipping", file=sys.stderr)
+                continue
+            
+            # Calculate cosine similarity
+            folder_array = np.array(folder_embedding, dtype=np.float64)
+            dot_product = np.dot(note_array, folder_array)
+            norm_note = np.linalg.norm(note_array)
+            norm_folder = np.linalg.norm(folder_array)
+            similarity = dot_product / (norm_note * norm_folder)
+            
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_folder = folder_path
+        
+        # Return best folder with confidence (similarity as confidence)
+        return (best_folder, max(0.0, min(1.0, best_similarity)))
+    
+    def _load_folder_embeddings_cache(self) -> Dict[str, List[float]]:
+        """
+        Load folder embeddings from local cache file.
+        
+        Returns: Dict mapping folder paths to embeddings
+        """
+        cache_path = self.vault_path / EMBEDDINGS_CACHE_FILE
+        
+        if not cache_path.exists():
+            return {}
+        
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Parse the markdown file
+            lines = content.split('\n')
+            cache = {}
+            
+            for line in lines:
+                if '|' in line:
+                    parts = line.split('|')
+                    if len(parts) >= 2:
+                        folder_path = parts[0].strip()
+                        try:
+                            # Parse the embedding (remove brackets and split)
+                            embedding_str = parts[1].strip()
+                            if embedding_str.startswith('[') and embedding_str.endswith(']'):
+                                embedding_str = embedding_str[1:-1]
+                            embedding = [float(x.strip()) for x in embedding_str.split(',')]
+                            cache[folder_path] = embedding
+                        except Exception as e:
+                            if DEBUG:
+                                print(f"[DEBUG] Failed to parse cache entry for {folder_path}: {e}", file=sys.stderr)
+            
+            if DEBUG:
+                print(f"[DEBUG] Loaded {len(cache)} folder embeddings from cache", file=sys.stderr)
+            
+            return cache
+            
+        except Exception as e:
+            print(f"[WARNING] Failed to load folder embeddings cache: {e}", file=sys.stderr)
+            return {}
+    
+    def _save_folder_embeddings_cache(self, cache: Dict[str, List[float]]):
+        """
+        Save folder embeddings to local cache file as markdown.
+        
+        Args:
+            cache: Dict mapping folder paths to embeddings
+        """
+        cache_path = self.vault_path / EMBEDDINGS_CACHE_FILE
+        
+        try:
+            # Create markdown content
+            lines = ["# Folder Embeddings Cache", ""]
+            lines.append(f"# Generated: {datetime.now().isoformat()}")
+            lines.append(f"# Valid for: {CACHE_VALIDITY_DAYS} days")
+            lines.append("")
+            lines.append("# Format: |folder_path|embedding_vector|")
+            lines.append("")
+            
+            for folder_path, embedding in cache.items():
+                embedding_str = str(embedding)
+                lines.append(f"|{folder_path}|{embedding_str}|")
+            
+            content = '\n'.join(lines)
+            
+            # Write to file
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            if DEBUG:
+                print(f"[DEBUG] Saved {len(cache)} folder embeddings to cache", file=sys.stderr)
+            
+        except Exception as e:
+            print(f"[WARNING] Failed to save folder embeddings cache: {e}", file=sys.stderr)
+    
+    def _is_cache_valid(self) -> bool:
+        """
+        Check if the local cache is still valid.
+        
+        Returns: True if cache exists and is not too old
+        """
+        cache_path = self.vault_path / EMBEDDINGS_CACHE_FILE
+        
+        if not cache_path.exists():
+            return False
+        
+        try:
+            cache_time = datetime.fromtimestamp(cache_path.stat().st_mtime)
+            age = datetime.now() - cache_time
+            
+            if age > timedelta(days=CACHE_VALIDITY_DAYS):
+                print(f"[INFO] Folder embeddings cache is {age.days} days old, refreshing", file=sys.stderr)
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"[WARNING] Failed to check cache validity: {e}", file=sys.stderr)
+            return False

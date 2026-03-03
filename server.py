@@ -18,7 +18,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="store_thought",
-            description="Store a thought in both Supabase and Obsidian. Note: This tool may take up to 150 seconds due to AI metadata extraction. Please wait for completion before retrying.",
+            description="Store a thought in both Supabase and Obsidian. Note: This tool may take up to 240 seconds due to AI metadata extraction. Please wait for completion before retrying.",
             inputSchema={
                 "type": "object",
                 "properties": {
