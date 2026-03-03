@@ -4,6 +4,9 @@ from typing import Dict, List
 from datetime import datetime
 from config import Config
 
+# Debug flag - set to True to enable debug output
+DEBUG = False
+
 class MetadataExtractor:
     """Metadata extractor using flexible AI provider (any OpenAI-compatible API)"""
     
@@ -19,7 +22,7 @@ class MetadataExtractor:
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
-                timeout=30,
+                timeout=90,  # Increased from 30 to 90 seconds for API reliability
                 max_retries=3
             )
         except ImportError:
@@ -96,16 +99,28 @@ class MetadataExtractor:
             
             # Parse JSON response
             metadata = json.loads(metadata_text)
+            if DEBUG:
+                print(f"[DEBUG] metadata.py - Parsed metadata from AI: {metadata}", file=sys.stderr)
             
             # Add additional processing
             metadata["title"] = title or self._generate_title(content)
             metadata["created_at"] = datetime.now().isoformat()
             
+            # Debug logging
+            if DEBUG:
+                print(f"[DEBUG] metadata.py - Title being set: '{title}'", file=sys.stderr)
+                print(f"[DEBUG] metadata.py - Metadata after title set: {metadata}", file=sys.stderr)
+                print(f"[DEBUG] metadata.py - 'title' in metadata: {'title' in metadata}", file=sys.stderr)
+                print(f"[DEBUG] metadata.py - Title value after set: {metadata.get('title')}", file=sys.stderr)
+                print(f"[DEBUG] extract_metadata - Content length: {len(content)}", file=sys.stderr)
+            
             return metadata
             
         except Exception as e:
             # Fallback if JSON parsing fails or API error occurs
-            print(f"[WARNING] Metadata extraction failed: {e}, using fallback")
+            print(f"[WARNING] Metadata extraction failed: {e}, using fallback", file=sys.stderr)
+            if DEBUG:
+                print(f"[DEBUG] extract_metadata - Fallback title param: '{title}'", file=sys.stderr)
             return {
                 "type": "note",
                 "topics": ["general"],
@@ -120,7 +135,24 @@ class MetadataExtractor:
     
     def _generate_title(self, content: str) -> str:
         """Generate a title from content if none provided"""
-        # Simple heuristic: first sentence or first 10 words
+        # First, try to find markdown headers (h1, h2, h3)
+        import re
+        
+        # Look for h1 (# Header) or h2 (## Header) headers
+        header_pattern = r'^(#{1,3})\s+(.+)$'
+        lines = content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            match = re.match(header_pattern, line)
+            if match:
+                title = match.group(2).strip()
+                # Remove any extra # symbols or formatting
+                title = re.sub(r'\s*#+$', '', title)
+                if title and len(title) > 3:
+                    return title[:50]  # Limit to 50 chars
+        
+        # Fallback: first sentence or first 10 words
         first_sentence = content.split('.')[0].strip()
         if len(first_sentence) > 50:
             return first_sentence[:50] + "..."

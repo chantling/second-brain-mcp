@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -7,6 +8,9 @@ from database import DatabaseManager
 from obsidian import ObsidianManager
 from embeddings import EmbeddingGenerator
 from metadata import MetadataExtractor
+
+# Debug flag - set to True to enable debug output
+DEBUG = False
 
 # Global instances
 db_manager = DatabaseManager()
@@ -49,11 +53,11 @@ class ToolHandlers:
     async def _sync_folders(self):
         """Sync folders to database on first tool call"""
         try:
-            print("[INFO] Syncing Obsidian folders to database...")
+            print("[INFO] Syncing Obsidian folders to database...", file=sys.stderr)
             stats = await obsidian_manager.sync_folders_to_database()
-            print(f"[INFO] Folder sync complete: {stats}")
+            print(f"[INFO] Folder sync complete: {stats}", file=sys.stderr)
         except Exception as e:
-            print(f"[WARNING] Failed to sync folders: {e}")
+            print(f"[WARNING] Failed to sync folders: {e}", file=sys.stderr)
     
     async def store_thought(
         self,
@@ -63,10 +67,27 @@ class ToolHandlers:
         source: str = "manual"
     ) -> Dict:
         """Store a thought in both Supabase and Obsidian"""
+        debug_info = {} if DEBUG else None
+        
         try:
+            # Debug: Capture initial parameters
+            if DEBUG:
+                debug_info["input_title"] = title
+                debug_info["content_length"] = len(content)
+            
             # Extract metadata if not provided
             if not metadata:
                 metadata = await metadata_extractor.extract_metadata(content, title)
+            
+            # CRITICAL FIX: Ensure title is in metadata
+            # The AI might not return title, so we add it from the parameter
+            if "title" not in metadata or not metadata.get("title"):
+                metadata["title"] = title or "Untitled"
+            
+            # Debug: Capture metadata after extraction
+            if DEBUG:
+                debug_info["metadata_keys"] = list(metadata.keys())
+                debug_info["metadata_title"] = metadata.get("title", "NOT_SET")
             
             # Generate vector embedding
             embedding = await embedding_generator.create_embedding(content)
@@ -75,33 +96,58 @@ class ToolHandlers:
             supabase_id = await db_manager.store_thought(content, embedding, metadata)
             
             # Determine folder using semantic search if folders are synced
-            if obsidian_manager._folders_synced:
+            if _folders_synced:
                 folder, confidence = await obsidian_manager._find_semantic_folder_match(content, metadata)
                 # Override folder in metadata if semantic search found a good match
                 if confidence >= 0.6:
                     metadata["folder"] = folder
-                    print(f"[INFO] Semantic folder search selected: {folder} (confidence: {confidence:.2f})")
+                    print(f"[INFO] Semantic folder search selected: {folder} (confidence: {confidence:.2f})", file=sys.stderr)
+            
+            # Debug: Capture metadata before creating note
+            if DEBUG:
+                debug_info["metadata_before_create"] = metadata.get("title", "NOT_SET")
+                debug_info["all_metadata_before_create"] = {k: v for k, v in metadata.items()}
             
             # Store in Obsidian
-            obsidian_path = obsidian_manager.create_note(content, {
+            obsidian_result = obsidian_manager.create_note(content, {
                 **metadata,
                 "supabase_id": supabase_id,
                 "source": source
             })
             
-            return {
+            # Extract path from the returned dict
+            obsidian_path = obsidian_result["path"]
+            
+            # Include obsidian debug info
+            if DEBUG:
+                debug_info["obsidian_create"] = obsidian_result.get("_debug", {})
+            
+            result = {
                 "success": True,
                 "supabase_id": supabase_id,
                 "obsidian_path": obsidian_path,
                 "message": "Thought stored successfully in both systems"
             }
             
+            # Include debug info in result
+            if DEBUG:
+                result["_debug"] = debug_info
+            
+            return result
+            
         except Exception as e:
-            return {
+            if debug_info is None:
+                debug_info = {}
+            debug_info["error"] = str(e)
+            debug_info["error_type"] = type(e).__name__
+            result = {
                 "success": False,
                 "error": str(e),
                 "message": "Failed to store thought"
             }
+            if DEBUG:
+                result["_debug"] = debug_info
+            return result
     
     async def semantic_search(
         self,

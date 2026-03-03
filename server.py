@@ -18,7 +18,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="store_thought",
-            description="Store a thought in both Supabase and Obsidian",
+            description="Store a thought in both Supabase and Obsidian. Note: This tool may take up to 90 seconds due to AI metadata extraction. Please wait for completion before retrying.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -136,7 +136,7 @@ async def main():
     """Main MCP server entry point"""
     # Set up signal handlers for graceful shutdown
     def signal_handler(signum, frame):
-        print(f"\nReceived signal {signum}, shutting down gracefully...")
+        print(f"\nReceived signal {signum}, shutting down gracefully...", file=sys.stderr)
         asyncio.create_task(shutdown())
     
     signal.signal(signal.SIGINT, signal_handler)
@@ -151,26 +151,26 @@ async def main():
                 server.create_initialization_options()
             )
     except KeyboardInterrupt:
-        print("\nServer interrupted by user")
+        print("\nServer interrupted by user", file=sys.stderr)
     except Exception as e:
-        print(f"Server error: {e}")
+        print(f"Server error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
         await shutdown()
 
 async def shutdown():
     """Graceful shutdown"""
-    print("Cleaning up resources...")
+    print("Cleaning up resources...", file=sys.stderr)
     await tool_handlers.cleanup()
-    print("Shutdown complete")
+    print("Shutdown complete", file=sys.stderr)
     sys.exit(0)
 
 if __name__ == "__main__":
     # Validate configuration before starting
     try:
         Config.validate()
-        print("Starting Second Brain MCP Server...")
+        print("Starting Second Brain MCP Server...", file=sys.stderr)
         asyncio.run(main())
     except Exception as e:
-        print(f"Configuration error: {e}")
+        print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)

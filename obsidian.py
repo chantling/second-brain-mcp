@@ -1,8 +1,12 @@
 import os
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+
+# Debug flag - set to True to enable debug output
+DEBUG = False
 
 class ObsidianManager:
     """
@@ -45,21 +49,64 @@ class ObsidianManager:
         
         return folders
     
-    def create_note(self, content: str, metadata: Dict) -> str:
+    def create_note(self, content: str, metadata: Dict) -> Dict:
         """
         Create a new note in Obsidian with intelligent folder selection.
         
-        Returns: Relative path to created note
+        Returns: Dict with 'path' (relative path) and optional '_debug' (debug information)
         """
+        debug_info = {} if DEBUG else None
+        
+        # Debug: Capture metadata
+        if DEBUG:
+            debug_info["metadata_keys"] = list(metadata.keys())
+            debug_info["metadata_title"] = metadata.get("title", "NOT_SET")
+            debug_info["metadata_type"] = metadata.get("type", "NOT_SET")
+        
         # Determine folder with confidence score
         folder_path, confidence = self._determine_folder(content, metadata)
+        if DEBUG:
+            debug_info["folder"] = folder_path
+            debug_info["folder_confidence"] = confidence
         
         # Ensure folder exists
         self._ensure_folder_exists(folder_path)
         
-        # Generate filename
+        # Generate filename with smart fallback
         title = metadata.get("title", "Untitled")
-        filename = f"{datetime.now().strftime('%Y-%m-%d')}-{self._sanitize_filename(title)}.md"
+        if DEBUG:
+            debug_info["title_from_metadata"] = title
+        
+        sanitized_title = self._sanitize_filename(title)
+        if DEBUG:
+            debug_info["sanitized_title"] = sanitized_title
+            debug_info["sanitized_title_length"] = len(sanitized_title)
+        
+        # Check if title is meaningful
+        generic_titles = ['untitled', 'untitled note', 'note']
+        is_generic = (len(sanitized_title) < 3 or 
+                      sanitized_title.lower() in generic_titles or
+                      sanitized_title.isdigit())
+        
+        if DEBUG:
+            debug_info["is_generic"] = is_generic
+            debug_info["sanitized_title_lower"] = sanitized_title.lower()
+            debug_info["in_generic_titles"] = sanitized_title.lower() in generic_titles
+            debug_info["length_lt_3"] = len(sanitized_title) < 3
+            debug_info["is_digit"] = sanitized_title.isdigit()
+        
+        # Generate filename based on title quality
+        if is_generic:
+            filename = f"{datetime.now().strftime('%Y-%m-%d')}-{sanitized_title}.md"
+            if DEBUG:
+                debug_info["filename_format"] = "generic_with_date"
+        else:
+            filename = f"{sanitized_title}.md"
+            if DEBUG:
+                debug_info["filename_format"] = "title_only"
+        
+        if DEBUG:
+            debug_info["filename"] = filename
         filepath = self.vault_path / folder_path / filename
         
         # Create frontmatter
@@ -69,7 +116,14 @@ class ObsidianManager:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(f"{frontmatter}\n\n{content}")
         
-        return str(filepath.relative_to(self.vault_path))
+        result = {
+            "path": str(filepath.relative_to(self.vault_path))
+        }
+        
+        if DEBUG:
+            result["_debug"] = debug_info
+        
+        return result
     
     def _determine_folder(self, content: str, metadata: Dict) -> Tuple[str, float]:
         """
@@ -322,7 +376,7 @@ class ObsidianManager:
         Returns: Sync statistics
         """
         if not self.db_manager:
-            print("[WARNING] No database manager provided, skipping folder sync")
+            print("[WARNING] No database manager provided, skipping folder sync", file=sys.stderr)
             return {"total": 0, "created": 0, "updated": 0, "errors": ["No database manager"]}
         
         folders_data = []
@@ -350,19 +404,19 @@ class ObsidianManager:
                 folders_data.append(folder_info)
                 
             except Exception as e:
-                print(f"[WARNING] Failed to process folder {folder}: {e}")
+                print(f"[WARNING] Failed to process folder {folder}: {e}", file=sys.stderr)
         
         # Sync to database
         if folders_data:
-            print(f"[INFO] Syncing {len(folders_data)} folders to database...")
+            print(f"[INFO] Syncing {len(folders_data)} folders to database...", file=sys.stderr)
             stats = await self.db_manager.sync_folders(folders_data)
-            print(f"[INFO] Folder sync complete: {stats['created']} created, {stats['updated']} updated")
+            print(f"[INFO] Folder sync complete: {stats['created']} created, {stats['updated']} updated", file=sys.stderr)
             if stats['errors']:
-                print(f"[WARNING] Errors during sync: {len(stats['errors'])}")
+                print(f"[WARNING] Errors during sync: {len(stats['errors'])}", file=sys.stderr)
             self._folders_synced = True
             return stats
         else:
-            print("[INFO] No folders to sync")
+            print("[INFO] No folders to sync", file=sys.stderr)
             return {"total": 0, "created": 0, "updated": 0, "errors": []}
     
     def _generate_folder_description(self, folder: Path) -> str:
@@ -459,6 +513,6 @@ class ObsidianManager:
             return self._find_semantic_match(content, metadata.get("topics", []))
             
         except Exception as e:
-            print(f"[WARNING] Semantic folder search failed: {e}")
+            print(f"[WARNING] Semantic folder search failed: {e}", file=sys.stderr)
             # Fallback to local matching
             return self._find_semantic_match(content, metadata.get("topics", []))

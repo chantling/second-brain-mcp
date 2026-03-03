@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -52,11 +53,11 @@ class Config:
         
         # Check for API keys (new vars take precedence, legacy vars as fallback)
         if not cls.EMBEDDING_API_KEY and cls.OPENROUTER_API_KEY:
-            print("[INFO] Using legacy OPENROUTER_API_KEY for embeddings")
+            print("[INFO] Using legacy OPENROUTER_API_KEY for embeddings", file=sys.stderr)
             cls.EMBEDDING_API_KEY = cls.OPENROUTER_API_KEY
         
         if not cls.METADATA_API_KEY and cls.ZAI_API_KEY:
-            print("[INFO] Using legacy ZAI_API_KEY for metadata")
+            print("[INFO] Using legacy ZAI_API_KEY for metadata", file=sys.stderr)
             cls.METADATA_API_KEY = cls.ZAI_API_KEY
         
         # Validate that we have at least one API key for each service
@@ -66,7 +67,7 @@ class Config:
         if not cls.METADATA_API_KEY:
             raise ValueError("Missing required environment variable: METADATA_API_KEY (or ZAI_API_KEY)")
         
-        print("[OK] All configuration validated successfully")
+        print("[OK] All configuration validated successfully", file=sys.stderr)
 
 # Validate configuration on import
 Config.validate()

@@ -245,10 +245,10 @@ class DatabaseManager:
             ).execute()
             
             if not response.data:
-                print("[DEBUG] No folders found in database")
+                print("[DEBUG] No folders found in database", file=sys.stderr)
                 return []
             
-            print(f"[DEBUG] Retrieved {len(response.data)} folders from database")
+            print(f"[DEBUG] Retrieved {len(response.data)} folders from database", file=sys.stderr)
             
             # Calculate cosine similarity in Python
             import numpy as np
@@ -276,23 +276,23 @@ class DatabaseManager:
                     folder['similarity'] = float(similarity)
                     results.append(folder)
                 else:
-                    print(f"[DEBUG] Folder {folder.get('path')} has no embedding")
+                    print(f"[DEBUG] Folder {folder.get('path')} has no embedding", file=sys.stderr)
             
             if not results:
-                print("[DEBUG] No folders with embeddings found")
+                print("[DEBUG] No folders with embeddings found", file=sys.stderr)
                 return []
             
             # Sort by similarity (highest first)
             results.sort(key=lambda x: x['similarity'], reverse=True)
             
-            print(f"[DEBUG] Top folder similarity: {results[0]['similarity']:.4f}")
+            print(f"[DEBUG] Top folder similarity: {results[0]['similarity']:.4f}", file=sys.stderr)
             
             # Return top results
             return results[:limit]
                 
         except Exception as e:
             # Fallback: get folders without similarity scoring
-            print(f"[WARNING] Vector search failed: {e}, using fallback")
+            print(f"[WARNING] Vector search failed: {e}, using fallback", file=sys.stderr)
             import traceback
             traceback.print_exc()
             try:
@@ -307,7 +307,7 @@ class DatabaseManager:
                 return results
                 
             except Exception as fallback_e:
-                print(f"[WARNING] Failed to search folders: {fallback_e}")
+                print(f"[WARNING] Failed to search folders: {fallback_e}", file=sys.stderr)
                 return []
     
     async def get_all_folders(self) -> List[Dict]:
@@ -320,5 +320,5 @@ class DatabaseManager:
             return response.data if response.data else []
             
         except Exception as e:
-            print(f"[WARNING] Failed to get folders: {e}")
+            print(f"[WARNING] Failed to get folders: {e}", file=sys.stderr)
             return []
