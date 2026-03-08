@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import sys
 import time
+import weakref
 from pathlib import Path
 from typing import Dict, Set, Optional, Tuple
 from datetime import datetime
@@ -24,19 +25,55 @@ class LazyImport:
     _obsidian_manager = None
     _embedding_generator = None
     _metadata_extractor = None
-    _event_loop = None
+    _event_loop_ref: Optional[weakref.ref] = None
 
     @classmethod
     def set_event_loop(cls, loop):
-        """Set the event loop for async operations"""
-        cls._event_loop = loop
+        """Set event loop with weak reference for auto-cleanup"""
+        cls._event_loop_ref = weakref.ref(loop)
+        if Config.DEBUG:
+            print(f"[LAZY] Event loop set (ref: {cls._event_loop_ref})", file=sys.stderr)
 
     @classmethod
-    def get_event_loop(cls):
-        """Get the event loop"""
-        if cls._event_loop is None:
-            cls._event_loop = asyncio.get_event_loop()
-        return cls._event_loop
+    def get_event_loop(cls) -> asyncio.AbstractEventLoop:
+        """Get event loop, with cleanup of dead references"""
+        loop_ref = cls._event_loop_ref
+
+        if loop_ref is None:
+            # No loop set yet
+            loop = asyncio.get_event_loop()
+            cls._event_loop_ref = weakref.ref(loop)
+            if Config.DEBUG:
+                print(f"[LAZY] Created new event loop", file=sys.stderr)
+            return loop
+
+        loop = loop_ref()
+        if loop is None:
+            # Loop was garbage collected, get new one
+            loop = asyncio.get_event_loop()
+            cls._event_loop_ref = weakref.ref(loop)
+            if Config.DEBUG:
+                print(f"[LAZY] Event loop was GC'd, created new one", file=sys.stderr)
+
+        return loop
+
+    @classmethod
+    def cleanup(cls):
+        """Explicitly release event loop and manager references"""
+        if Config.DEBUG:
+            print("[LAZY] Cleanup: Releasing references", file=sys.stderr)
+
+        # Clear event loop reference
+        cls._event_loop_ref = None
+
+        # Clear manager references
+        cls._db_manager = None
+        cls._obsidian_manager = None
+        cls._embedding_generator = None
+        cls._metadata_extractor = None
+
+        if Config.DEBUG:
+            print("[LAZY] Cleanup complete", file=sys.stderr)
 
     @classmethod
     def get_db_manager(cls):
@@ -130,19 +167,24 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
         # Task queue for processing
         self._task_queue = asyncio.Queue()
-        
+
         # Track files where we shouldn't process the next modify event
         # (because we're writing frontmatter ourselves)
         self._skip_next_modify: Set[str] = set()
-        
+
         # Track files currently being moved to suppress delete/create events
         # Maps src_path -> (dest_path, timestamp) for files in transit
         self._files_being_moved: Dict[str, Tuple[str, float]] = {}
-        
+
         # Track recently deleted files to correlate with creates (since on_moved doesn't fire on Windows)
         # Maps deleted_path -> (filename, rel_path, timestamp) for detection of move events
         self._recent_deletes: Dict[str, Tuple[str, str, float]] = {}
-        
+
+        # ✅ NEW: Move event queue for async-safe coordination
+        self._move_event_queue: asyncio.Queue = asyncio.Queue()
+        self._active_moves: Set[str] = set()
+        self._move_event_lock: asyncio.Lock = asyncio.Lock()
+
         # Initialize processing lock
         if ObsidianEventHandler._processing_lock is None:
             try:
@@ -199,46 +241,61 @@ class ObsidianEventHandler(FileSystemEventHandler):
             return
 
         src_path = self._decode_path(event.src_path)
-        
+
         # Clean up any stale move tracking entries
         self._cleanup_stale_moves()
         self._cleanup_stale_deletes()
-        
+
+        # ✅ Check if destination is part of an active move
+        try:
+            loop = LazyImport.get_event_loop()
+            is_active = asyncio.run_coroutine_threadsafe(
+                self._is_in_active_moves(src_path),
+                loop
+            ).result(timeout=0.1)
+
+            if is_active:
+                if Config.DEBUG:
+                    print(f"[CREATE] Skipping create for active move: {src_path}", file=sys.stderr)
+                return
+        except (RuntimeError, asyncio.TimeoutError):
+            pass
+
         rel_path = self._get_relative_path(src_path)
         filename = Path(src_path).name  # Just the filename (e.g., "My Note.md")
         _log(f"[CREATE] File created: {rel_path} (filename={filename})", "CREATE")
-        
+
         # CRITICAL FIX: Detect moves by correlating with recent deletes
         # On Windows, watchdog fires delete + create for moves, not on_moved()
         # Check if this create has matching filename with recent delete -> it's a move!
-        
+
         _log(f"[CREATE] Checking {len(self._recent_deletes)} recent deletes for move detection", "CREATE")
-        
+
         matching_delete = None
         current_time = time.time()
-        
+
         for deleted_path, (deleted_filename, deleted_rel_path, delete_time) in list(self._recent_deletes.items()):
             time_diff = current_time - delete_time
             is_filename_match = deleted_filename == filename  # Same filename = likely a move
             is_time_match = time_diff < 2.0  # Create must happen within 2 seconds of delete
-            
+
             _log(f"[CREATE] Comparing: deleted_file={deleted_filename}, created_file={filename}, filename_match={is_filename_match}, time_diff={time_diff:.2f}s", "CREATE")
-            
+
             if is_filename_match and is_time_match:
                 matching_delete = (deleted_path, deleted_filename, deleted_rel_path, delete_time)
                 _log(f"[CREATE] ✓ MOVE DETECTED: {deleted_rel_path} → {rel_path}", "CREATE")
                 break
-        
+
         if matching_delete:
             # This is a move! Handle it as a path update instead of a new entry
             deleted_path, deleted_filename, deleted_rel_path, delete_time = matching_delete
-            
+
             # Remove from recent_deletes tracking
             del self._recent_deletes[deleted_path]
-            
+
             if Config.DEBUG:
                 print(f"[WATCHER] MOVE detected: {deleted_rel_path} → {rel_path}", file=sys.stderr)
-            
+
             # Queue move event for processing
             asyncio.run_coroutine_threadsafe(
                 self._debounce_move_event(deleted_path, src_path), LazyImport.get_event_loop()
@@ -246,7 +303,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
         else:
             # This is a genuine new file creation
             _log(f"[CREATE] No matching delete found - treating as new file creation", "CREATE")
-            
+
             if Config.DEBUG:
                 print(f"[WATCHER] File created (new): {src_path}", file=sys.stderr)
 
@@ -395,30 +452,48 @@ class ObsidianEventHandler(FileSystemEventHandler):
         """Handle file/directory deletion events"""
         if not self._should_process(event):
             return
-        
+
         src_path = self._decode_path(event.src_path)
-        
+
         # Clean up any stale move tracking entries
         self._cleanup_stale_moves()
         self._cleanup_stale_deletes()
-        
+
+        # ✅ Check if file is part of an active move
+        # Use synchronous check here since we're in watchdog thread
+        # Get event loop and run coroutine synchronously for checking
+        try:
+            loop = LazyImport.get_event_loop()
+            is_active = asyncio.run_coroutine_threadsafe(
+                self._is_in_active_moves(src_path),
+                loop
+            ).result(timeout=0.1)  # 100ms timeout
+
+            if is_active:
+                if Config.DEBUG:
+                    print(f"[DELETE] Skipping delete for active move: {src_path}", file=sys.stderr)
+                return
+        except (RuntimeError, asyncio.TimeoutError):
+            # Event loop not ready or check timed out, proceed with delete
+            pass
+
         # Handle directory deletions separately (for folders table cleanup)
         if event.is_directory:
             self._handle_directory_deleted(src_path)
             return
-        
+
         # CRITICAL FIX: Track recent deletes to correlate with creates
         # On Windows, watchdog fires delete + create for moves, not on_moved()
         # We use filename matching: if filename is same, it's likely a move (folder change)
-        
+
         rel_path = self._get_relative_path(src_path) if Path(src_path).exists() else src_path
         filename = Path(src_path).name  # Just filename (e.g., "My Note.md")
-        
+
         # Store in recent_deletes for potential move correlation
         # We'll do DB lookup later when we detect move
         self._recent_deletes[src_path] = (filename, rel_path, time.time())
         _log(f"[DELETE] Tracking recent delete: {rel_path} (filename={filename})", "DELETE")
-        
+
         if Config.DEBUG:
             print(f"[WATCHER] File marked as recently deleted (waiting for create to detect move): {src_path}", file=sys.stderr)
     
@@ -472,22 +547,28 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
         src_path = self._decode_path(event.src_path)
         dest_path = self._decode_path(event.dest_path) if event.dest_path else ""
-        
-        # CRITICAL FIX: Immediately add to _files_being_moved (synchronously)
-        # This must happen before on_deleted/on_created can fire, which happens microseconds later
-        # The async debounce task will remove it after processing completes
-        self._files_being_moved[src_path] = (dest_path, time.time())
-        _log(f"[MOVE] on_moved: Added to _files_being_moved: src={src_path}, dest={dest_path}", "MOVE_TRACK")
-        _log(f"[MOVE] _files_being_moved now has {len(self._files_being_moved)} entries", "MOVE_TRACK")
-        
+
+        # ✅ FIX #1: Push move notification to async queue (thread-safe)
+        # This prevents race conditions with on_deleted/on_created
+        try:
+            loop = LazyImport.get_event_loop()
+            asyncio.run_coroutine_threadsafe(
+                self._move_event_queue.put({
+                    'type': 'move',
+                    'src_path': src_path,
+                    'dest_path': dest_path,
+                    'timestamp': time.time()
+                }),
+                loop
+            )
+        except RuntimeError:
+            # Event loop not running yet
+            print(f"[WATCHER] Event loop not running, queuing move: {src_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"[ERROR] Failed to queue move event: {e}", file=sys.stderr)
+
         if Config.DEBUG:
             print(f"[WATCHER] File moved: {src_path} → {dest_path}", file=sys.stderr)
-
-        # FIX #1: Use debouncing for moves (debounce by destination path)
-        # Moves are special since we need both src and dest paths
-        asyncio.run_coroutine_threadsafe(
-            self._debounce_move_event(src_path, dest_path), LazyImport.get_event_loop()
-        )
 
     def _should_process(self, event: FileSystemEvent) -> bool:
         """Check if event should be processed"""
@@ -726,6 +807,52 @@ class ObsidianEventHandler(FileSystemEventHandler):
             # Always mark as done processing
             _log(f"[PROCESS] Marking as done processing: {obsidian_path} type={event_type}", "PROCESS")
             await self._mark_processing(obsidian_path, False)
+
+    async def _process_move_queue(self):
+        """Process move events from queue in correct order"""
+        while self._running:
+            try:
+                event = await asyncio.wait_for(
+                    self._move_event_queue.get(),
+                    timeout=1.0
+                )
+
+                src_path = event['src_path']
+                dest_path = event['dest_path']
+
+                if Config.DEBUG:
+                    print(f"[MOVE_QUEUE] Processing move: {src_path} → {dest_path}", file=sys.stderr)
+
+                # Mark move in progress (async-protected)
+                async with self._move_event_lock:
+                    self._active_moves.add(src_path)
+                    self._active_moves.add(dest_path)
+
+                try:
+                    # Check if file still exists at destination
+                    if Path(dest_path).exists():
+                        await self._handle_move(src_path, dest_path)
+                    else:
+                        if Config.DEBUG:
+                            print(f"[MOVE_QUEUE] Destination no longer exists: {dest_path}", file=sys.stderr)
+                finally:
+                    # Remove from active moves
+                    async with self._move_event_lock:
+                        self._active_moves.discard(src_path)
+                        self._active_moves.discard(dest_path)
+
+            except asyncio.TimeoutError:
+                # No events in queue, continue loop
+                continue
+            except Exception as e:
+                print(f"[ERROR] Failed to process move from queue: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+
+    async def _is_in_active_moves(self, file_path: str) -> bool:
+        """Check if file path is in active moves"""
+        async with self._move_event_lock:
+            return file_path in self._active_moves
 
     async def _handle_create(self, file_path: str):
         """Handle new note creation in Obsidian"""
@@ -1425,12 +1552,18 @@ def start_file_watcher(vault_path: Path, event_loop: asyncio.AbstractEventLoop):
 
     # Start event processor background task
     event_loop.create_task(event_handler._event_processor())
-    
+
+    # ✅ FIX #1: Start move queue processor
+    move_processor_task = event_loop.create_task(event_handler._process_move_queue())
+    if Config.DEBUG:
+        print("[WATCHER] Started move queue processor", file=sys.stderr)
+
     # Start periodic cleanup timer (every 30 seconds)
     cleanup_task = event_loop.create_task(_cleanup_timer_loop())
-    
+
     observer = Observer()
     observer.schedule(event_handler, str(vault_path), recursive=True)
     observer.start()
     print(f"[WATCHER] File watcher started for: {vault_path}", file=sys.stderr)
-    return observer, cleanup_task
+    # ✅ Return move processor task as well so it can be cancelled on shutdown
+    return observer, cleanup_task, move_processor_task

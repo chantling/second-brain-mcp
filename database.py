@@ -24,6 +24,30 @@ def debug_log_to_file(message: str):
         pass
 
 
+# ✅ FIX #4: Define _log function for database operations
+def _log(message: str, level: str = "INFO"):
+    """Database operation logging with consistent format
+
+    Args:
+        message: Log message
+        level: Log level (INFO, WARNING, ERROR, DELETE, INSERT, LOOKUP, etc.)
+    """
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    log_msg = f"[{timestamp}] [DB:{level}] {message}"
+
+    print(log_msg, file=sys.stderr)
+
+    # Also write to database_debug.log if DEBUG enabled
+    if Config.DEBUG:
+        try:
+            db_log_file = Path(__file__).parent / "database_debug.log"
+            with open(db_log_file, "a", encoding="utf-8") as f:
+                f.write(log_msg + "\n")
+                f.flush()
+        except Exception:
+            pass  # Don't fail logging if can't write to file
+
+
 class DatabaseManager:
     """Database manager for Supabase operations using Supabase Python API"""
 
@@ -254,29 +278,44 @@ class DatabaseManager:
             return []
 
     async def get_todos(self, completed: bool = False) -> List[Dict]:
-        """Get todo items"""
-        response = (
-            self.client.table("thoughts")
-            .select(
-                "id, content, thought_type, topics, people, action_items, created_at, obsidian_path, metadata"
+        """Get todo items with timeout protection"""
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.client.table("thoughts")
+                    .select(
+                        "id, content, thought_type, topics, people, action_items, created_at, obsidian_path, metadata"
+                    )
+                    .eq("thought_type", "todo")
+                    .order("created_at", desc=True)
+                    .execute
+                ),
+                timeout=Config.DB_TIMEOUT
             )
-            .eq("thought_type", "todo")
-            .order("created_at", desc=True)
-            .execute()
-        )
 
-        if not response.data:
-            raise Exception(f"Failed to get todos: {response}")
+            if not response.data:
+                _log(f"[DB:GET_TODOS] No todos found", "GET_TODOS")
+                return []
 
-        results = response.data
+            results = response.data
 
-        # Filter by completion status if needed
-        if completed:
-            results = [r for r in results if r.get("metadata", {}).get("completed")]
-        else:
-            results = [r for r in results if not r.get("metadata", {}).get("completed")]
+            # Filter by completion status if needed
+            if completed:
+                results = [r for r in results if r.get("metadata", {}).get("completed")]
+            else:
+                results = [r for r in results if not r.get("metadata", {}).get("completed")]
 
-        return results
+            _log(f"[DB:GET_TODOS] Retrieved {len(results)} todos (completed={completed})", "GET_TODOS")
+            return results
+
+        except asyncio.TimeoutError:
+            _log(f"[DB:GET_TODOS] ERROR: Timeout after {Config.DB_TIMEOUT}s", "GET_TODOS")
+            print(f"[ERROR] get_todos timeout after {Config.DB_TIMEOUT}s", file=sys.stderr)
+            return []
+        except Exception as e:
+            _log(f"[DB:GET_TODOS] ERROR: {str(e)}", "GET_TODOS")
+            print(f"[ERROR] Failed to get todos: {e}", file=sys.stderr)
+            return []
 
     async def close(self):
         """Close the Supabase client"""
@@ -530,7 +569,7 @@ class DatabaseManager:
         """Delete thought by ID"""
         _log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
         try:
-            _log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
+            #_log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
             # Delete related links
             self.client.table("links").delete().eq(
                 "source_thought_id", thought_id
@@ -728,34 +767,6 @@ class DatabaseManager:
                 )
         except Exception as e:
             print(f"[WARNING] Failed to update obsidian_path: {e}", file=sys.stderr)
-
-    async def delete_thought_by_id(self, thought_id: int):
-        """Delete thought by ID"""
-        _log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
-        try:
-            # Delete related links
-            self.client.table("links").delete().eq(
-                "source_thought_id", thought_id
-            ).execute()
-            
-            self.client.table("links").delete().eq(
-                "target_thought_id", thought_id
-            ).execute()
-            
-            # Delete tag associations
-            self.client.table("thought_tags").delete().eq(
-                "thought_id", thought_id
-            ).execute()
-            
-            # Delete thought
-            self.client.table("thoughts").delete().eq("id", thought_id).execute()
-            
-            _log(f"[DB:DELETE] Successfully deleted thought ID: {thought_id}", "DELETE")
-            return True
-        except Exception as e:
-            _log(f"[DB:DELETE] ERROR deleting thought {thought_id}: {e}", "DELETE")
-            return False
-
 
     async def delete_folder_by_path(self, folder_path: str):
         """Delete folder entry from database folders table"""
@@ -1026,5 +1037,49 @@ def get_tracking_params() -> Set[str]:
     custom_params = Config.DUPLICATE_TRACKING_PARAMS
     if custom_params:
         default_params.update(p.strip() for p in custom_params.split(","))
+
+    return default_params
+
+
+def transform_metadata_for_database(metadata: Dict) -> Dict:
+    """Transform metadata for database storage
+
+    Handles:
+    - 'type' → 'thought_type' (defaults to 'knowledge')
+    - Standard fields: topics, people, action_items, obsidian_path, source, file_hash
+    - Extra fields → metadata JSONB
+
+    Args:
+        metadata: Raw metadata dict from user input
+
+    Returns:
+        Transformed metadata dict ready for database
+    """
+    result = {}
+
+    # Transform 'type' to 'thought_type'
+    if "type" in metadata:
+        result["thought_type"] = metadata["type"]
+    else:
+        result["thought_type"] = "knowledge"
+
+    # Extract standard fields
+    standard_fields = ["topics", "people", "action_items", "obsidian_path", "source", "file_hash"]
+    for field in standard_fields:
+        if field in metadata:
+            result[field] = metadata[field]
+        elif field in ["topics", "people", "action_items"]:
+            # Default empty lists for array fields
+            result[field] = []
+
+    # Put everything else in metadata JSONB
+    extra_fields = {}
+    for key, value in metadata.items():
+        if key not in standard_fields and key != "type" and key != "thought_type":
+            extra_fields[key] = value
+
+    result["metadata"] = extra_fields
+
+    return result
 
     return default_params

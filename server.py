@@ -604,8 +604,12 @@ async def main():
         if is_primary and Config.SYNC_ENABLED:
             try:
                 vault_path = Path(Config.OBSIDIAN_VAULT_PATH)
-                _file_watcher_observer, _cleanup_timer_task = start_file_watcher(vault_path, loop)
+                # ✅ FIX #1: Handle new return value (3 values: observer, cleanup_task, move_processor_task)
+                _file_watcher_observer, _cleanup_timer_task, _move_processor_task = start_file_watcher(vault_path, loop)
                 debug_log("[SYNC] File watcher enabled")
+
+                # Add move processor task to background tasks
+                background_tasks.append(_move_processor_task)
 
                 # Initial sync of existing notes (runs in background)
                 if Config.SYNC_INITIAL_SYNC:
@@ -632,7 +636,7 @@ async def main():
                     )
                 )
                 background_tasks.append(heartbeat_task)
-                
+
                 # Start periodic orphan cleanup task (every 10 minutes)
                 orphan_cleanup_task = loop.create_task(
                     _periodic_orphan_cleanup_loop(600)  # 600 seconds = 10 minutes
@@ -708,6 +712,11 @@ async def shutdown():
     """Graceful shutdown"""
     print("Cleaning up resources...", file=sys.stderr)
     await tool_handlers.cleanup()
+
+    # ✅ FIX #2: Cleanup LazyImport references
+    from watcher import LazyImport
+    LazyImport.cleanup()
+
     print("Shutdown complete", file=sys.stderr)
 
 

@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv
 
 # Load environment variables from .env file in second-brain-mcp directory
@@ -172,13 +173,68 @@ class Config:
         except Exception as e:
             print(f"[CONFIG] Failed to load blacklist: {e}", file=sys.stderr)
             return []
-    
-    # Load blacklist on config load
-    IGNORED_PATHS = cls._load_blacklist()
-    IGNORED_FILES = [item for item in IGNORED_PATHS if '.' in item]
+
+    @classmethod
+    def _initialize_blacklists(cls):
+        """Initialize IGNORED_PATHS and IGNORED_FILES from multiple sources"""
+        from pathlib import Path
+
+        # Load from .blacklist file
+        blacklist_items = cls._load_blacklist()
+
+        # Separate into paths and files based on content
+        # Paths: Don't contain . or end with /
+        # Files: Contain . and don't contain /
+        ignored_paths = []
+        ignored_files = []
+
+        for item in blacklist_items:
+            # Skip comments and empty lines (already handled in _load_blacklist)
+            if not item or item.startswith('#'):
+                continue
+
+            # Check if it's a path or file
+            # Heuristic: If it ends with / or doesn't contain ., it's a path
+            # If it contains . and doesn't have /, it's a file
+            item_stripped = item.strip()
+
+            if item_stripped.endswith('/') or '.' not in item_stripped:
+                ignored_paths.append(item_stripped.rstrip('/'))
+            else:
+                # Extract just filename if path provided
+                if '/' in item_stripped:
+                    filename = Path(item_stripped).name
+                    ignored_files.append(filename)
+                else:
+                    ignored_files.append(item_stripped)
+
+        # Also parse environment variables for backward compatibility
+        env_paths_str = os.getenv("IGNORED_PATHS", "")
+        env_files_str = os.getenv("IGNORED_FILES", "")
+
+        if env_paths_str:
+            env_paths = cls._parse_list_var(env_paths_str)
+            ignored_paths.extend(env_paths)
+
+        if env_files_str:
+            env_files = cls._parse_list_var(env_files_str)
+            ignored_files.extend(env_files)
+
+        # Remove duplicates and sort, then assign to class variables
+        cls.IGNORED_PATHS = sorted(list(set(ignored_paths)))
+        cls.IGNORED_FILES = sorted(list(set(ignored_files)))
+
+        if Config.DEBUG:
+            print(f"[CONFIG] Initialized blacklists: {len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files", file=sys.stderr)
+            if hasattr(Config, 'DEBUG_VERBOSE') and Config.DEBUG_VERBOSE:
+                print(f"[CONFIG] IGNORED_PATHS: {cls.IGNORED_PATHS}", file=sys.stderr)
+                print(f"[CONFIG] IGNORED_FILES: {cls.IGNORED_FILES}", file=sys.stderr)
 
     print("[OK] All configuration validated successfully", file=sys.stderr)
 
-
-# Validate configuration on import
-Config.validate()
+    # Validate configuration on import
+    @staticmethod
+    def validate():
+        """Validate configuration and initialize blacklists"""
+        # Call _initialize_blacklists to populate IGNORED_PATHS and IGNORED_FILES
+        Config._initialize_blacklists()
