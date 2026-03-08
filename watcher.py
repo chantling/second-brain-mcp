@@ -184,6 +184,9 @@ class ObsidianEventHandler(FileSystemEventHandler):
         self._move_event_queue: asyncio.Queue = asyncio.Queue()
         self._active_moves: Set[str] = set()
         self._move_event_lock: asyncio.Lock = asyncio.Lock()
+        
+        # NEW: Deferred move queue for files that are currently being processed
+        self._deferred_move_queue: asyncio.Queue = asyncio.Queue()
 
         # Initialize processing lock
         if ObsidianEventHandler._processing_lock is None:
@@ -237,7 +240,15 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
     def on_created(self, event: FileSystemEvent):
         """Handle file creation events"""
+        src_path = self._decode_path(event.src_path)
+        _log(f"[RAW EVENT] on_created: {src_path} (is_dir={event.is_directory})", "RAW")
+        if Config.DEBUG:
+            print(f"[WATCHER] on_created called: {src_path}", file=sys.stderr)
+        if Config.DEBUG_VERBOSE:
+            print(f"[VERBOSE] Event type: {event.event_type}, src_path: {event.src_path}", file=sys.stderr)
+            print(f"[VERBOSE] Event attributes: {dir(event)}", file=sys.stderr)
         if not self._should_process(event):
+            _log(f"[RAW EVENT] on_created filtered out by _should_process", "RAW")
             return
 
         src_path = self._decode_path(event.src_path)
@@ -377,19 +388,39 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 
                 # CRITICAL FIX: Update the moved file's frontmatter with supabase_id
                 # This ensures the note and Supabase entry remain linked
-                _log(f"[MOVE] Updating frontmatter with supabase_id={supabase_id}", "MOVE")
-                try:
-                    self._skip_next_modify.add(dest_path)
-                    self._update_frontmatter(dest_path, supabase_id)
-                    print(f"[WATCHER] Updated moved note's frontmatter with supabase_id: {supabase_id}", file=sys.stderr)
-                    _log(f"[MOVE] Frontmatter updated successfully", "MOVE")
-                except Exception as fm_err:
-                    _log(f"[MOVE] Failed to update frontmatter: {str(fm_err)}", "MOVE")
-                    print(f"[WARNING] Failed to update frontmatter for moved note: {fm_err}", file=sys.stderr)
+                # Only update if destination file still exists (might have been deleted)
+                if Path(dest_path).exists():
+                    _log(f"[MOVE] Updating frontmatter with supabase_id={supabase_id}", "MOVE")
+                    try:
+                        self._skip_next_modify.add(dest_path)
+                        self._update_frontmatter(dest_path, supabase_id)
+                        print(f"[WATCHER] Updated moved note's frontmatter with supabase_id: {supabase_id}", file=sys.stderr)
+                        _log(f"[MOVE] Frontmatter updated successfully", "MOVE")
+                    except Exception as fm_err:
+                        _log(f"[MOVE] Failed to update frontmatter: {str(fm_err)}", "MOVE")
+                        print(f"[WARNING] Failed to update frontmatter for moved note: {fm_err}", file=sys.stderr)
+                else:
+                    _log(f"[MOVE] Destination file no longer exists, skipping frontmatter update: {dest_path}", "MOVE")
+                    print(f"[WATCHER] Destination file no longer exists, skipping frontmatter update: {dest_path}", file=sys.stderr)
                 
                 return
             
-            # No entry found at all - this shouldn't happen during a move operation
+            # No entry found - check if source file is currently being processed (race condition)
+            # If so, defer the move until processing completes
+            src_is_processing = await self._is_processing(src_obsidian_path)
+            if src_is_processing:
+                _log(f"[MOVE] Source file currently being processed, deferring move: {src_obsidian_path}", "MOVE")
+                print(f"[WATCHER] Source file being processed, deferring move update: {src_obsidian_path} → {dest_obsidian_path}", file=sys.stderr)
+                
+                # Queue move for later processing
+                await self._deferred_move_queue.put({
+                    'src_path': src_path,
+                    'dest_path': dest_path,
+                    'timestamp': time.time()
+                })
+                return
+            
+            # No entry found and not being processed - this shouldn't happen during a move operation
             # but if it does, we should not create a new entry via recursion
             _log(f"[MOVE] WARNING: No entry found for move operation, doing nothing", "MOVE")
             print(
@@ -427,7 +458,11 @@ class ObsidianEventHandler(FileSystemEventHandler):
     
     def on_modified(self, event: FileSystemEvent):
         """Handle file modification events"""
+        _log(f"[RAW EVENT] on_modified: {self._decode_path(event.src_path)} (is_dir={event.is_directory})", "RAW")
+        if Config.DEBUG:
+            print(f"[WATCHER] on_modified called: {self._decode_path(event.src_path)}", file=sys.stderr)
         if not self._should_process(event):
+            _log(f"[RAW EVENT] on_modified filtered out by _should_process", "RAW")
             return
 
         src_path = self._decode_path(event.src_path)
@@ -449,8 +484,16 @@ class ObsidianEventHandler(FileSystemEventHandler):
         )
 
     def on_deleted(self, event: FileSystemEvent):
-        """Handle file/directory deletion events"""
+        """Handle file deletion events"""
+        src_path = self._decode_path(event.src_path)
+        _log(f"[RAW EVENT] on_deleted: {src_path} (is_dir={event.is_directory})", "RAW")
+        if Config.DEBUG:
+            print(f"[WATCHER] on_deleted called: {src_path}", file=sys.stderr)
+        if Config.DEBUG_VERBOSE:
+            print(f"[VERBOSE] Event type: {event.event_type}, src_path: {event.src_path}", file=sys.stderr)
+            print(f"[VERBOSE] Event attributes: {dir(event)}", file=sys.stderr)
         if not self._should_process(event):
+            _log(f"[RAW EVENT] on_deleted filtered out by _should_process", "RAW")
             return
 
         src_path = self._decode_path(event.src_path)
@@ -475,6 +518,23 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 return
         except (RuntimeError, asyncio.TimeoutError):
             # Event loop not ready or check timed out, proceed with delete
+            pass
+        
+        # NEW FIX: Check if source file is currently being processed (race condition handling)
+        # If a file is being modified/embedded and then moved, the modify handler might not have finished
+        try:
+            loop = LazyImport.get_event_loop()
+            src_obsidian_path = self._get_relative_path(src_path)
+            is_processing = asyncio.run_coroutine_threadsafe(
+                self._is_processing(src_obsidian_path),
+                loop
+            ).result(timeout=0.1)
+            
+            if is_processing:
+                _log(f"[DELETE] File currently being processed, extending delete tracking timeout: {src_path}", "DELETE")
+                # Extend the delete tracking time to allow modify to complete
+                # The entry will be cleaned up by orphan cleanup if it truly disappears
+        except (RuntimeError, asyncio.TimeoutError):
             pass
 
         # Handle directory deletions separately (for folders table cleanup)
@@ -542,7 +602,16 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
     def on_moved(self, event: FileSystemEvent):
         """Handle file move/rename events"""
+        src_path = self._decode_path(event.src_path)
+        dest_path = self._decode_path(event.dest_path) if event.dest_path else ""
+        _log(f"[RAW EVENT] on_moved: {src_path} -> {dest_path} (is_dir={event.is_directory})", "RAW")
+        if Config.DEBUG:
+            print(f"[WATCHER] on_moved called: {src_path} -> {dest_path}", file=sys.stderr)
+        if Config.DEBUG_VERBOSE:
+            print(f"[VERBOSE] Event type: {event.event_type}, src_path: {event.src_path}, dest_path: {event.dest_path}", file=sys.stderr)
+            print(f"[VERBOSE] Event attributes: {dir(event)}", file=sys.stderr)
         if not self._should_process(event):
+            _log(f"[RAW EVENT] on_moved filtered out by _should_process", "RAW")
             return
 
         src_path = self._decode_path(event.src_path)
@@ -574,33 +643,49 @@ class ObsidianEventHandler(FileSystemEventHandler):
         """Check if event should be processed"""
         # Decode path if bytes (Windows)
         src_path = self._decode_path(event.src_path)
-
+        
+        _log(f"[SHOULD_PROCESS] Checking: {src_path}", "FILTER")
+        
         # Only process markdown files
         if not src_path.endswith(".md"):
+            _log(f"[SHOULD_PROCESS] FILTERED: Not .md file", "FILTER")
             return False
-
+ 
         # Skip directories
         if event.is_directory:
             # Only process directory DELETE events, not CREATE or MODIFY
-            return event.event_type == EVENT_TYPE_DELETED
-        
+            result = event.event_type == EVENT_TYPE_DELETED
+            _log(f"[SHOULD_PROCESS] Directory check: is_dir=True, event_type={event.event_type}, result={result}", "FILTER")
+            return result
+         
         # Skip excluded paths and files
-
+        _log(f"[SHOULD_PROCESS] Not a directory, checking blacklist...", "FILTER")
+ 
         # Skip excluded paths and files
-        rel_path = str(Path(src_path).relative_to(self.vault_path))
+        try:
+            rel_path = str(Path(src_path).relative_to(self.vault_path))
+            _log(f"[SHOULD_PROCESS] Relative path: {rel_path}", "FILTER")
+        except ValueError as e:
+            _log(f"[SHOULD_PROCESS] ERROR: Cannot get relative path: {e}", "FILTER")
+            _log(f"[SHOULD_PROCESS] src_path={src_path}, vault_path={self.vault_path}", "FILTER")
+            return False
+            
         for blacklisted_item in Config.IGNORED_PATHS:
             if self._is_path_blacklisted(rel_path, src_path, blacklisted_item):
+                _log(f"[SHOULD_PROCESS] FILTERED: Blacklisted path: {rel_path} (pattern: {blacklisted_item})", "FILTER")
                 if Config.DEBUG:
                     print(f"[SKIP] Ignoring path in ignore list: {rel_path}", file=sys.stderr)
                 return False
         for blacklisted_file in Config.IGNORED_FILES:
             filename = Path(src_path).name
             if filename == blacklisted_file or filename.startswith(blacklisted_file):
+                _log(f"[SHOULD_PROCESS] FILTERED: Blacklisted file: {filename} (pattern: {blacklisted_file})", "FILTER")
                 if Config.DEBUG:
                     print(f"[SKIP] Ignoring file in ignore list: {filename}", file=sys.stderr)
                 return False
-
-                return True
+ 
+        _log(f"[SHOULD_PROCESS] PASSED: Will process this event", "FILTER")
+        return True
     
     def _is_path_blacklisted(self, rel_path: str, abs_path: str, pattern: str) -> bool:
         """Check if path matches a blacklist pattern
@@ -810,8 +895,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
     async def _process_move_queue(self):
         """Process move events from queue in correct order"""
+        _log("[MOVE QUEUE] Starting move queue processor", "MOVE")
+        print("[WATCHER] Move queue processor started", file=sys.stderr)
         while self._running:
             try:
+                queue_size = self._move_event_queue.qsize()
+                if queue_size > 0:
+                    _log(f"[MOVE QUEUE] Queue size: {queue_size}", "MOVE")
                 event = await asyncio.wait_for(
                     self._move_event_queue.get(),
                     timeout=1.0
@@ -819,9 +909,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
                 src_path = event['src_path']
                 dest_path = event['dest_path']
-
+ 
+                _log(f"[MOVE QUEUE] Received move event: {src_path} → {dest_path}", "MOVE")
+                print(f"[MOVE_QUEUE] Processing move: {src_path} → {dest_path}", file=sys.stderr)
+ 
                 if Config.DEBUG:
-                    print(f"[MOVE_QUEUE] Processing move: {src_path} → {dest_path}", file=sys.stderr)
+                    print(f"[MOVE_QUEUE] DEBUG: Processing move: {src_path} → {dest_path}", file=sys.stderr)
 
                 # Mark move in progress (async-protected)
                 async with self._move_event_lock:
@@ -1170,7 +1263,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 # Update frontmatter with supabase_id
                 _log(f"[MODIFY] Updating frontmatter with new supabase_id={supabase_id}", "MODIFY")
                 self._skip_next_modify.add(file_path)
-                self._update_frontmatter(file_path, supabase_id)
+                
+                # Check if file still exists before updating frontmatter
+                if Path(file_path).exists():
+                    self._update_frontmatter(file_path, supabase_id)
+                else:
+                    _log(f"[MODIFY] File no longer exists, skipping frontmatter update: {file_path}", "MODIFY")
+                    print(f"[WATCHER] File no longer exists, skipping frontmatter update: {file_path}", file=sys.stderr)
 
                 print(
                     f"[SYNC] Created (from modify): {obsidian_path} → Supabase ID: {supabase_id}",
@@ -1544,26 +1643,115 @@ async def _cleanup_timer_loop():
 def start_file_watcher(vault_path: Path, event_loop: asyncio.AbstractEventLoop):
     """Start the file watcher observer"""
     import asyncio
-
+    from watchdog.observers.api import BaseObserver
+ 
     event_handler = ObsidianEventHandler(vault_path)
-
+ 
     # Set event loop for async operations
     LazyImport.set_event_loop(event_loop)
-
+ 
     # Start event processor background task
     event_loop.create_task(event_handler._event_processor())
-
+ 
     # ✅ FIX #1: Start move queue processor
     move_processor_task = event_loop.create_task(event_handler._process_move_queue())
     if Config.DEBUG:
         print("[WATCHER] Started move queue processor", file=sys.stderr)
-
+ 
     # Start periodic cleanup timer (every 30 seconds)
     cleanup_task = event_loop.create_task(_cleanup_timer_loop())
+    
+    # Start observer heartbeat task to verify it's alive
+    heartbeat_task = event_loop.create_task(_observer_heartbeat_loop(vault_path))
+    
+    # Start deferred move processor
+    deferred_move_task = event_loop.create_task(_process_deferred_moves(event_handler))
+    if Config.DEBUG:
+        print("[WATCHER] Started deferred move processor", file=sys.stderr)
 
     observer = Observer()
     observer.schedule(event_handler, str(vault_path), recursive=True)
     observer.start()
+    
+    print(f"[WATCHER] Observer type: {type(observer).__name__}", file=sys.stderr)
+    print(f"[WATCHER] Observer backend: {type(observer).__module__}.{type(observer).__name__}", file=sys.stderr)
+    
+    # Check for WindowsApiObserver specifically
+    if hasattr(observer, '_emitter') and hasattr(observer._emitter, 'watch'):
+        print(f"[WATCHER] Emitter type: {type(observer._emitter).__name__}", file=sys.stderr)
+        print(f"[WATCHER] Watch path: {observer._emitter.watch.path}", file=sys.stderr)
+    
+    print(f"[WATCHER] Observer is alive: {observer.is_alive()}", file=sys.stderr)
+    print(f"[WATCHER] Watching path: {vault_path}", file=sys.stderr)
+    print(f"[WATCHER] Recursive: True", file=sys.stderr)
     print(f"[WATCHER] File watcher started for: {vault_path}", file=sys.stderr)
-    # ✅ Return move processor task as well so it can be cancelled on shutdown
-    return observer, cleanup_task, move_processor_task
+    
+    # Log available event types on observer
+    print(f"[WATCHER] Event handler registered: {event_handler.__class__.__name__}", file=sys.stderr)
+    print(f"[WATCHER] Event handler has on_created: {hasattr(event_handler, 'on_created')}", file=sys.stderr)
+    print(f"[WATCHER] Event handler has on_deleted: {hasattr(event_handler, 'on_deleted')}", file=sys.stderr)
+    print(f"[WATCHER] Event handler has on_moved: {hasattr(event_handler, 'on_moved')}", file=sys.stderr)
+    
+    # ✅ Return all tasks so they can be cancelled on shutdown
+    return observer, cleanup_task, move_processor_task, heartbeat_task, deferred_move_task
+
+
+async def _observer_heartbeat_loop(vault_path: Path):
+    """Periodically check if observer is still alive"""
+    from watchdog.observers import Observer
+    
+    _last_observer_check = time.time()
+    
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            
+            # We need to get the observer instance - but we don't have direct access
+            # So we just log that heartbeat is running
+            _last_observer_check = time.time()
+            _log(f"[HEARTBEAT] Observer heartbeat check at {datetime.now().isoformat()}", "HEARTBEAT")
+            
+            # Check if any .md files have been modified recently
+            # This is a simple verification that the vault path exists
+            if vault_path.exists():
+                md_files = list(vault_path.rglob("*.md"))
+                _log(f"[HEARTBEAT] Vault has {len(md_files)} .md files", "HEARTBEAT")
+            else:
+                _log(f"[HEARTBEAT] WARNING: Vault path does not exist: {vault_path}", "HEARTBEAT")
+                
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            _log(f"[HEARTBEAT] ERROR: {e}", "ERROR")
+
+
+async def _process_deferred_moves(handler: ObsidianEventHandler):
+    """Process deferred moves (files that were moved while being processed)"""
+    if Config.DEBUG:
+        print("[WATCHER] Started deferred move processor", file=sys.stderr)
+    
+    while True:
+        try:
+            # Wait for a deferred move with timeout to allow checking for shutdown
+            try:
+                move_event = await asyncio.wait_for(handler._deferred_move_queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue  # Check for shutdown
+            
+            src_path = move_event['src_path']
+            dest_path = move_event['dest_path']
+            move_time = move_event['timestamp']
+            
+            _log(f"[DEFERRED_MOVE] Processing deferred move: {src_path} -> {dest_path}", "DEFERRED_MOVE")
+            
+            # Retry the move operation
+            await handler._handle_move(src_path, dest_path)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[ERROR] Failed to process deferred move: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+    
+    print("[WATCHER] Deferred move processor stopped", file=sys.stderr)

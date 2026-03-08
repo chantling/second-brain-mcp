@@ -15,6 +15,9 @@ import portalocker
 
 # Global file watcher reference
 _file_watcher_observer = None
+_cleanup_timer_task = None
+_move_processor_task = None
+_heartbeat_task = None
 
 # Global sync status tracking
 _initial_sync_complete = False
@@ -311,10 +314,10 @@ async def _run_folder_sync_startup():
 
 async def _run_orphan_cleanup_startup():
     """Run orphan cleanup on server startup (non-blocking background task)"""
-    print("[SYNC] Orphan cleanup task started, waiting 5 seconds...", file=sys.stderr)
+    print("[SYNC] Orphan cleanup task started, waiting 60 seconds...", file=sys.stderr)
     try:
-        # Wait 5 seconds to allow initial sync to complete
-        await asyncio.sleep(5)
+        # Wait 60 seconds to allow initial sync to complete
+        await asyncio.sleep(60)
         print("[SYNC] Running orphan cleanup on startup...", file=sys.stderr)
         from obsidian import ObsidianManager
         import tools
@@ -426,7 +429,7 @@ async def _sync_takeover(lock_manager: InstanceLock, event_loop):
         # Start file watcher
         debug_log("[SYNC] Starting file watcher for takeover...")
         vault_path = Path(Config.OBSIDIAN_VAULT_PATH)
-        _file_watcher_observer, _cleanup_timer_task = start_file_watcher(vault_path, event_loop)
+        _file_watcher_observer, _cleanup_timer_task, _move_processor_task, _heartbeat_task, _deferred_move_task = start_file_watcher(vault_path, event_loop)
         debug_log("[SYNC] File watcher started successfully")
 
         # Run hash-based sync to catch changes during gap period
@@ -473,9 +476,18 @@ async def _sync_takeover(lock_manager: InstanceLock, event_loop):
             try:
                 _file_watcher_observer.stop()
                 _cleanup_timer_task.cancel()
+                if _move_processor_task:
+                    _move_processor_task.cancel()
+                if _heartbeat_task:
+                    _heartbeat_task.cancel()
+                if _deferred_move_task:
+                    _deferred_move_task.cancel()
                 _file_watcher_observer.join()
                 _file_watcher_observer = None
                 _cleanup_timer_task = None
+                _move_processor_task = None
+                _heartbeat_task = None
+                _deferred_move_task = None
             except Exception as cleanup_error:
                 print(
                     f"[ERROR] Failed to cleanup file watcher: {cleanup_error}",
@@ -625,12 +637,14 @@ async def main():
         if is_primary and Config.SYNC_ENABLED:
             try:
                 vault_path = Path(Config.OBSIDIAN_VAULT_PATH)
-                # ✅ FIX #1: Handle new return value (3 values: observer, cleanup_task, move_processor_task)
-                _file_watcher_observer, _cleanup_timer_task, _move_processor_task = start_file_watcher(vault_path, loop)
+                # ✅ FIX #1: Handle new return value (5 values: observer, cleanup_task, move_processor_task, heartbeat_task, deferred_move_task)
+                _file_watcher_observer, _cleanup_timer_task, _move_processor_task, _heartbeat_task, _deferred_move_task = start_file_watcher(vault_path, loop)
                 debug_log("[SYNC] File watcher enabled")
-
+ 
                 # Add move processor task to background tasks
                 background_tasks.append(_move_processor_task)
+                background_tasks.append(_heartbeat_task)
+                background_tasks.append(_deferred_move_task)
 
                 # Initial sync of existing notes (runs in background)
                 if Config.SYNC_INITIAL_SYNC:

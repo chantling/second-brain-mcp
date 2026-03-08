@@ -98,6 +98,7 @@ class Config:
 
     # Debug Configuration
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+    DEBUG_VERBOSE = os.getenv("DEBUG_VERBOSE", "false").lower() == "true"
 
     # Validation
     @classmethod
