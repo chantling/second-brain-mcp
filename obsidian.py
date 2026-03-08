@@ -1399,12 +1399,12 @@ class ObsidianManager:
                     )
                     if Config.DEBUG:
                         print(f"[SYNC] Stored with supabase_id={supabase_id}", file=sys.stderr)
+                    
+                    # Update frontmatter with supabase_id
+                    self._update_frontmatter(md_file, supabase_id)
                 else:
                     if Config.DEBUG:
                         print(f"[SYNC] db_manager is NOT set, skipping store", file=sys.stderr)
-                    
-                    # Update frontmatter
-                    self._update_frontmatter(md_file, supabase_id)
                     
                     # Verify path was set (should be in metadata above, but ensure it's in DB)
                     await self.db_manager.update_obsidian_path(supabase_id, rel_path)

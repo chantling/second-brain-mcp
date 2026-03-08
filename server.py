@@ -309,6 +309,27 @@ async def _run_folder_sync_startup():
     except Exception as e:
         print(f"[ERROR] Folder sync failed on startup: {e}", file=sys.stderr)
 
+async def _run_orphan_cleanup_startup():
+    """Run orphan cleanup on server startup (non-blocking background task)"""
+    print("[SYNC] Orphan cleanup task started, waiting 5 seconds...", file=sys.stderr)
+    try:
+        # Wait 5 seconds to allow initial sync to complete
+        await asyncio.sleep(5)
+        print("[SYNC] Running orphan cleanup on startup...", file=sys.stderr)
+        from obsidian import ObsidianManager
+        import tools
+        
+        obsidian_manager = ObsidianManager(
+            Config.OBSIDIAN_VAULT_PATH, db_manager=tools.db_manager
+        )
+        sync_result = obsidian_manager.get_last_sync_result()
+        await obsidian_manager.remove_orphaned_supabase_entries(exclude_ids=sync_result.get("ids", []) if sync_result else [])
+        print("[SYNC] Orphan cleanup completed on startup", file=sys.stderr)
+    except Exception as e:
+        print(f"[ERROR] Orphan cleanup failed on startup: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+
 
 async def _lock_retry_loop(lock_manager: InstanceLock, interval: int, jitter: int):
     """Periodically attempt to acquire lock if secondary instance"""
@@ -628,6 +649,12 @@ async def main():
                     )
                     folder_sync_task = loop.create_task(_run_folder_sync_startup())
                     background_tasks.append(folder_sync_task)
+                
+                # Run orphan cleanup shortly after startup (after initial sync completes)
+                if Config.SYNC_ENABLED:
+                    print("[SYNC] Creating orphan cleanup startup task...", file=sys.stderr)
+                    orphan_startup_task = loop.create_task(_run_orphan_cleanup_startup())
+                    background_tasks.append(orphan_startup_task)
 
                 # Start heartbeat task for primary instance
                 heartbeat_task = loop.create_task(
