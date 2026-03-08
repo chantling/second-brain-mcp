@@ -1,0 +1,3 @@
+# place files or folders to ignore one per line
+.\!Folder_Embeddings.md
+.\.obsidian

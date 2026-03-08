@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 from typing import Dict, List
 from datetime import datetime
 from config import Config
@@ -37,6 +38,11 @@ class MetadataExtractor:
         max_length = 4000
         if len(content) > max_length:
             content = content[:max_length]
+        
+        # Extract video_id and url from frontmatter or content BEFORE calling AI
+        # This ensures these critical fields are preserved for duplicate detection
+        video_id = self._extract_video_id(content)
+        url = self._extract_url(content)
         
         prompt = f"""
         Analyze this content and extract structured metadata:
@@ -106,6 +112,20 @@ class MetadataExtractor:
             metadata["title"] = title or self._generate_title(content)
             metadata["created_at"] = datetime.now().isoformat()
             
+            # IMPORTANT: Preserve video_id and url for duplicate detection
+            if video_id:
+                metadata["video_id"] = video_id
+                if DEBUG:
+                    print(f"[DEBUG] metadata.py - Added video_id: {video_id}", file=sys.stderr)
+            if url:
+                metadata["url"] = url
+                if DEBUG:
+                    print(f"[DEBUG] metadata.py - Added url: {url}", file=sys.stderr)
+            
+            if DEBUG:
+                print(f"[DEBUG] metadata.py - Final metadata before return has video_id: {'video_id' in metadata}, url: {'url' in metadata}", file=sys.stderr)
+                print(f"[DEBUG] metadata.py - Returning metadata with keys: {list(metadata.keys())}", file=sys.stderr)
+            
             # Debug logging
             if DEBUG:
                 print(f"[DEBUG] metadata.py - Title being set: '{title}'", file=sys.stderr)
@@ -113,6 +133,8 @@ class MetadataExtractor:
                 print(f"[DEBUG] metadata.py - 'title' in metadata: {'title' in metadata}", file=sys.stderr)
                 print(f"[DEBUG] metadata.py - Title value after set: {metadata.get('title')}", file=sys.stderr)
                 print(f"[DEBUG] extract_metadata - Content length: {len(content)}", file=sys.stderr)
+                print(f"[DEBUG] extract_metadata - video_id extracted: {video_id}", file=sys.stderr)
+                print(f"[DEBUG] extract_metadata - url extracted: {url}", file=sys.stderr)
             
             return metadata
             
@@ -121,7 +143,7 @@ class MetadataExtractor:
             print(f"[WARNING] Metadata extraction failed: {e}, using fallback", file=sys.stderr)
             if DEBUG:
                 print(f"[DEBUG] extract_metadata - Fallback title param: '{title}'", file=sys.stderr)
-            return {
+            fallback = {
                 "type": "note",
                 "topics": ["general"],
                 "people": [],
@@ -132,6 +154,12 @@ class MetadataExtractor:
                 "title": title or "Untitled",
                 "created_at": datetime.now().isoformat()
             }
+            # Add video_id and url if present
+            if video_id:
+                fallback["video_id"] = video_id
+            if url:
+                fallback["url"] = url
+            return fallback
     
     def _generate_title(self, content: str) -> str:
         """Generate a title from content if none provided"""
@@ -157,6 +185,49 @@ class MetadataExtractor:
         if len(first_sentence) > 50:
             return first_sentence[:50] + "..."
         return first_sentence or "Untitled Note"
+    
+    def _extract_video_id(self, content: str) -> str:
+        """Extract video_id from frontmatter or content"""
+        import re
+        
+        # Check frontmatter first
+        if content.startswith("---"):
+            frontmatter_end = content.find("\n---", 3)
+            if frontmatter_end != -1:
+                frontmatter = content[3:frontmatter_end]
+                # Look for video_id in frontmatter
+                match = re.search(r'video_id:\s*["\']?([a-zA-Z0-9_-]+)["\']?', frontmatter)
+                if match:
+                    return match.group(1)
+        
+        # Check for YouTube video ID patterns in content
+        # YouTube URL patterns: youtube.com/watch?v=xxxxx or youtu.be/xxxxx
+        match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)', content)
+        if match:
+            return match.group(1)
+        
+        return None
+    
+    def _extract_url(self, content: str) -> str:
+        """Extract URL from frontmatter or content"""
+        import re
+        
+        # Check frontmatter first
+        if content.startswith("---"):
+            frontmatter_end = content.find("\n---", 3)
+            if frontmatter_end != -1:
+                frontmatter = content[3:frontmatter_end]
+                # Look for url in frontmatter
+                match = re.search(r'url:\s*["\']?([^\s"\'\n]+)["\']?', frontmatter)
+                if match:
+                    return match.group(1)
+        
+        # Check for URLs in content (common patterns)
+        match = re.search(r'https?://[^\s\)\]\}]+', content)
+        if match:
+            return match.group(0)
+        
+        return None
     
     async def close(self):
         """Close the OpenAI client"""
