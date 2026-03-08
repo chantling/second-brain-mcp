@@ -1320,18 +1320,8 @@ class ObsidianManager:
                     content, file_rel_path
                 )
 
-                # Check if already in Supabase by path
-                if self.db_manager:
-                    existing = await self.db_manager.get_thought_by_obsidian_path(
-                        rel_path
-                    )
-                    if existing:
-                        # Entry exists with matching path - skip
-                        skipped_count += 1
-                        continue
-
                 # Check if note has a supabase_id in frontmatter
-                # If so, verify it still exists
+                # If so, verify it still exists in database
                 if metadata and metadata.get("supabase_id"):
                     supabase_id = metadata.get("supabase_id")
                     try:
@@ -1339,7 +1329,7 @@ class ObsidianManager:
                         existing_entry = await self.db_manager.get_thought(supabase_id)
 
                         if existing_entry:
-                            # Entry still exists - don't create duplicate
+                            # Entry still exists and matches frontmatter - skip
                             # If note was moved, orphan cleanup will handle updating the path
                             # If note needs re-syncing (content changed), we'll handle that separately
                             print(
@@ -1360,6 +1350,23 @@ class ObsidianManager:
                             f"[SYNC] Error checking supabase_id {supabase_id}: {e}, re-syncing...",
                             file=sys.stderr,
                         )
+                
+                # Check if already in Supabase by path (but no frontmatter)
+                # This handles case where DB entry exists but file doesn't have frontmatter
+                if self.db_manager:
+                    existing = await self.db_manager.get_thought_by_obsidian_path(
+                        rel_path
+                    )
+                    if existing and existing.get("id"):
+                        # Entry exists but file doesn't have frontmatter
+                        # Update frontmatter with existing database ID
+                        print(
+                            f"[SYNC] Found DB entry (ID: {existing.get('id')}) but no frontmatter, updating...",
+                            file=sys.stderr,
+                        )
+                        self._update_frontmatter(md_file, existing.get("id"))
+                        skipped_count += 1
+                        continue
 
                 # Extract metadata if needed
                 if not metadata or not metadata.get("topics"):
