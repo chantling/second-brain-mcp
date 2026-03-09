@@ -30,10 +30,15 @@ class InstanceLock:
     regardless of where server.py is called from.
     """
     def __init__(self, config):
-        """Initialize lock manager with configuration
-
+        """Initialize instance lock manager with configuration.
+        
+        Determines lock file location based on script directory to ensure consistent
+        path resolution. Generates unique instance ID, stores start time,
+        and sets stale threshold from config. Prepares for lock acquisition
+        and heartbeat monitoring.
+        
         Args:
-            config: Config object with lock configuration
+            config: Config object with lock configuration including threshold and file settings
         """
 
         # Use directory of this file (instance_lock.py) for lock file location

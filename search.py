@@ -16,6 +16,12 @@ class SearchManager:
     def __init__(
         self, db_manager: DatabaseManager, embedding_generator: EmbeddingGenerator
     ):
+        """Initialize search manager with database and embedding generator dependencies.
+        
+        Stores references to the database manager for executing queries and the
+        embedding generator for creating query embeddings. Provides multiple search
+        strategies including hybrid search combining vector and keyword matching.
+        """
         self.db_manager = db_manager
         self.embedding_generator = embedding_generator
 

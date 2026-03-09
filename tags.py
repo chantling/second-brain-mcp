@@ -15,6 +15,13 @@ class TagManager:
     def __init__(
         self, db_manager: DatabaseManager, embedding_generator: EmbeddingGenerator
     ):
+        """Initialize tag manager with database and embedding generator dependencies.
+        
+        Stores references to database manager for tag queries and embedding
+        generator for semantic similarity matching. Provides methods for managing
+        tags, suggesting relevant tags based on content, and consolidating
+        similar tags.
+        """
         self.db_manager = db_manager
         self.embedding_generator = embedding_generator
 

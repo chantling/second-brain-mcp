@@ -441,7 +441,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
             traceback.print_exc()
 
     def _cleanup_stale_moves(self):
-        """Remove stale entries from _files_being_moved (older than 30 seconds)"""
+        """Remove stale entries from _files_being_moved tracking dictionary.
+        
+        Entries older than 30 seconds are considered stale and are removed
+        from the tracking to prevent memory leaks from moves that were
+        never completed or detected.
+        """
         current_time = time.time()
         stale_threshold = 30  # seconds
         
@@ -457,7 +462,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
                     print(f"[WATCHER] Cleaned up stale move entry: {src_path}", file=sys.stderr)
     
     def on_modified(self, event: FileSystemEvent):
-        """Handle file modification events"""
+        """Handle file modification events from the file system.
+        
+        Queues the modify event for debounced processing after a delay
+        to prevent multiple triggers from rapid successive changes. Checks if the
+        modification should be skipped (e.g., when the watcher itself
+        writes to a file) to avoid infinite loops.
+        """
         _log(f"[RAW EVENT] on_modified: {self._decode_path(event.src_path)} (is_dir={event.is_directory})", "RAW")
         if Config.DEBUG:
             print(f"[WATCHER] on_modified called: {self._decode_path(event.src_path)}", file=sys.stderr)
@@ -484,7 +495,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
         )
 
     def on_deleted(self, event: FileSystemEvent):
-        """Handle file deletion events"""
+        """Handle file deletion events from the file system.
+        
+        Tracks recently deleted files to detect move operations (on Windows,
+        moves are represented as delete + create). Skips deletions that are
+        part of an active move operation. Handles directory deletions
+        separately for folder table cleanup.
+        """
         src_path = self._decode_path(event.src_path)
         _log(f"[RAW EVENT] on_deleted: {src_path} (is_dir={event.is_directory})", "RAW")
         if Config.DEBUG:
@@ -575,7 +592,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
             print(f"[ERROR] Failed to handle directory deletion: {e}", file=sys.stderr)
 
     def _cleanup_stale_deletes(self):
-        """Remove stale entries from _recent_deletes (older than 5 seconds)"""
+        """Remove stale entries from _recent_deletes tracking dictionary.
+        
+        Entries older than 5 seconds are considered stale and are removed
+        from tracking. If a delete entry remains stale after this timeout, the
+        corresponding database entry is deleted as the file was truly removed.
+        """
         current_time = time.time()
         stale_threshold = 5  # seconds - wait this long to see if a create follows
         
@@ -601,7 +623,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 print(f"[WATCHER] Cleaned up stale delete entry: {rel_path}", file=sys.stderr)
 
     def on_moved(self, event: FileSystemEvent):
-        """Handle file move/rename events"""
+        """Handle file move/rename events from the file system.
+        
+        Queues move events to an async queue for thread-safe processing.
+        On Windows, on_moved() may not fire for some operations, so
+        move detection also happens via correlation of delete + create events.
+        """
         src_path = self._decode_path(event.src_path)
         dest_path = self._decode_path(event.dest_path) if event.dest_path else ""
         _log(f"[RAW EVENT] on_moved: {src_path} -> {dest_path} (is_dir={event.is_directory})", "RAW")
@@ -723,7 +750,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
         return False
     
     async def _debounce_event(self, file_path: str, event_type: str):
-        """Debounce rapid successive events for same file"""
+        """Debounce rapid successive events for the same file.
+        
+        Prevents multiple rapid events (e.g., create followed by modify)
+        from causing duplicate processing. Cancels any existing pending task
+        for the file and schedules a new one with the configured debounce delay.
+        """
         rel_path = self._get_relative_path(file_path)
         _log(f"[DEBOUNCE] _debounce_event called: {rel_path} type={event_type}", "DEBOUNCE")
         
@@ -759,7 +791,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
         _log(f"[DEBOUNCE] Scheduled {event_type} for {rel_path} in {self._debounce_delay}s", "DEBOUNCE")
 
     async def _debounce_move_event(self, src_path: str, dest_path: str):
-        """FIX #1: Debounce move events using destination path as key"""
+        """Debounce move events using destination path as key.
+        
+        Prevents multiple rapid move events for the same destination file
+        from causing duplicate processing. Cancels any existing pending move task
+        and schedules a new one with the configured debounce delay.
+        """
         current_time = time.time()
         
         # Note: _files_being_moved[src_path] was already set synchronously in on_moved()
@@ -794,7 +831,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
         }
 
     async def _process_move_after_delay(self, src_path: str, dest_path: str):
-        """FIX #1: Process move event after debounce delay"""
+        """Process move event after debounce delay expires.
+        
+        Checks if destination file is already being processed to prevent conflicts.
+        Marks both source and destination paths as processing to coordinate with
+        delete/create handlers. Executes the actual move operation and
+        cleans up tracking state when complete.
+        """
         await asyncio.sleep(self._debounce_delay)
         
         # Convert both paths to obsidian paths
@@ -826,23 +869,37 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 del self._files_being_moved[src_path]
 
     async def _process_event_after_delay(self, file_path: str, event_type: str):
-        """Process event after debounce delay"""
+        """Process file system event after debounce delay expires.
+        
+        Implements file-level locking to prevent concurrent processing of
+        same file. Verifies that event is still the latest in the queue
+        before executing, and delegates to the appropriate handler (create, modify,
+        or delete) based on event type.
+        """
+        _log(f"[DEBUG] _process_event_after_delay 01 - ENTRY: file_path={file_path}, event_type={event_type}", "PROCESS")
         rel_path = self._get_relative_path(file_path) if Path(file_path).exists() else file_path
+        _log(f"[DEBUG] _process_event_after_delay 02 - rel_path={rel_path}", "PROCESS")
         _log(f"[PROCESS] Starting debounce delay ({self._debounce_delay}s) for {rel_path} type={event_type}", "PROCESS")
         
         await asyncio.sleep(self._debounce_delay)
         
+        _log(f"[DEBUG] _process_event_after_delay 03 - AFTER DELAY", "PROCESS")
         _log(f"[PROCESS] Debounce delay complete, processing {event_type} for {rel_path}", "PROCESS")
-
+        
         # Convert to obsidian path for processing lock
         try:
+            _log(f"[DEBUG] _process_event_after_delay 04 - Getting obsidian path", "PROCESS")
             obsidian_path = self._get_relative_path(file_path)
+            _log(f"[DEBUG] _process_event_after_delay 05 - obsidian_path={obsidian_path}", "PROCESS")
         except ValueError:
-            # File path is not relative to vault (probably deleted file)
+            _log(f"[DEBUG] _process_event_after_delay 06 - ValueError getting obsidian path", "PROCESS")
             obsidian_path = file_path
-
+        
+        _log(f"[DEBUG] _process_event_after_delay 07 - About to check if processing", "PROCESS")
         # FIX #2: Use file-level locking to prevent concurrent processing
         is_processing = await self._is_processing(obsidian_path)
+        _log(f"[DEBUG] _process_event_after_delay 08 - is_processing={is_processing}", "PROCESS")
+        
         if is_processing:
             _log(f"[PROCESS] SKIP: File already being processed: {obsidian_path} type={event_type}", "PROCESS")
             if Config.DEBUG:
@@ -855,10 +912,11 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
         try:
             # Verify this is still the latest event for this file
+            _log(f"[DEBUG] _process_event_after_delay 10 - Checking debounce queue", "PROCESS")
             if file_path in self._debounce_queue:
                 queue_entry = self._debounce_queue[file_path]
                 queued_event_type = queue_entry.get("event_type")
-                _log(f"[PROCESS] Checking if still latest event: queued={queued_event_type} current={event_type}", "PROCESS")
+                _log(f"[DEBUG] _process_event_after_delay 11 - queued={queued_event_type}, current={event_type}", "PROCESS")
                 
                 if queued_event_type == event_type:
                     # Process the event
@@ -948,7 +1006,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
             return file_path in self._active_moves
 
     async def _handle_create(self, file_path: str):
-        """Handle new note creation in Obsidian"""
+        """Handle new note creation in the Obsidian vault.
+        
+        Reads the file content, extracts metadata, and creates a new database entry
+        if the note doesn't already exist. Skips empty files (waiting for
+        user to add content). Updates frontmatter with the Supabase ID after
+        successful storage to maintain bidirectional linking.
+        """
         obsidian_path = None
         try:
             obsidian_path = self._get_relative_path(file_path) if Path(file_path).exists() else file_path
@@ -1127,6 +1191,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
     async def _handle_modify(self, file_path: str):
         """Handle note modification in Obsidian"""
+        _log(f"[DEBUG] _handle_modify 01", "MODIFY")
         try:
             # Get path first for logging
             try:
@@ -1161,7 +1226,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
             if metadata and metadata.get("supabase_id"):
                 supabase_id = metadata["supabase_id"]
                 db_manager = LazyImport.get_db_manager()
-
+                _log(f"[DEBUG] _handle_modify 02", "MODIFY")
                 try:
                     # Try to get the entry with this supabase_id
                     entry_by_id = await db_manager.get_thought(supabase_id)
@@ -1202,7 +1267,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
                                 file_hash,
                                 metadata,
                             )
-
+                            _log(f"[DEBUG] _handle_modify 03", "MODIFY")
                             print(
                                 f"[SYNC] Modified: {obsidian_path} (supabase_id: {supabase_id})",
                                 file=sys.stderr,
@@ -1211,6 +1276,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
                         else:
                             # Entry exists but has different path - this is a moved note
                             # Don't create new entry, let orphan cleanup handle path update
+                            _log(f"[DEBUG] _handle_modify 04", "MODIFY")
                             print(
                                 f"[WATCHER] Modified note has supabase_id {supabase_id} but different path, skipping: {obsidian_path}",
                                 file=sys.stderr,
@@ -1218,6 +1284,11 @@ class ObsidianEventHandler(FileSystemEventHandler):
                             return
                 except Exception:
                     # Entry doesn't exist (was deleted) - recreate it
+                    _log(f"[MODIFY] Entry no longer exists, recreating: {obsidian_path}", "MODIFY")
+                    print(
+                        f"[WATCHER] Entry no longer exists, recreating: {file_path}",
+                        file=sys.stderr,
+                )
                     pass
 
             # Check if already tracked by path
@@ -1282,6 +1353,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
             if existing.get("file_hash") == file_hash:
                 _log(f"[MODIFY] SKIP: Content unchanged, hash matches", "MODIFY")
                 if Config.DEBUG:
+                    _log(f"[DEBUG] _handle_modify 05", "MODIFY")
                     print(
                         f"[WATCHER] No content change detected: {obsidian_path}",
                         file=sys.stderr,
@@ -1305,10 +1377,11 @@ class ObsidianEventHandler(FileSystemEventHandler):
             await db_manager.update_thought(
                 existing["id"], content, embedding, file_hash, metadata
             )
-
+            _log(f"[DEBUG] _handle_modify 06", "MODIFY")
             print(f"[SYNC] Modified: {obsidian_path}", file=sys.stderr)
 
         except Exception as e:
+            _log(f"[DEBUG] _handle_modify 07", "MODIFY")
             print(
                 f"[ERROR] Failed to handle modify for {file_path}: {e}", file=sys.stderr
             )
@@ -1316,6 +1389,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
             traceback.print_exc()
         finally:
+            _log(f"[DEBUG] _handle_modify 08", "MODIFY")
             # Mark as done processing
             obsidian_path = self._get_relative_path(file_path)
             await self._mark_processing(obsidian_path, False)
@@ -1428,11 +1502,21 @@ class ObsidianEventHandler(FileSystemEventHandler):
         return None
 
     def _get_relative_path(self, file_path: str) -> str:
-        """Get path relative to vault"""
+        """Convert absolute file path to path relative to vault root.
+        
+        Takes an absolute path and returns it as a relative path from the
+        configured Obsidian vault path. Used for storing consistent paths
+        in the database regardless of where the code runs from.
+        """
         return str(Path(file_path).relative_to(self.vault_path))
 
     def _compute_hash(self, content: str) -> str:
-        """Compute SHA-256 hash of content"""
+        """Compute SHA-256 hash of note content.
+        
+        Takes the full content string and returns a SHA-256 hash in hexadecimal
+        format. Used for detecting content changes to avoid unnecessary database
+        updates when files are modified without actual content changes.
+        """
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def _extract_frontmatter(self, content: str, file_identifier: str = None) -> Dict:
@@ -1551,7 +1635,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
         return make_json_serializable(data)
 
     def _update_frontmatter(self, file_path: str, supabase_id: int):
-        """Update note's frontmatter with supabase_id"""
+        """Update note's YAML frontmatter with Supabase ID.
+        
+        Reads the file, finds or creates the frontmatter section, and adds
+        the supabase_id field to maintain bidirectional linking between Obsidian
+        notes and database entries. Handles existing frontmatter gracefully and
+        writes the updated content back to the file.
+        """
         try:
             import yaml
         except ImportError:
@@ -1641,7 +1731,13 @@ async def _cleanup_timer_loop():
 
 
 def start_file_watcher(vault_path: Path, event_loop: asyncio.AbstractEventLoop):
-    """Start the file watcher observer"""
+    """Start the file system watcher for the Obsidian vault.
+    
+    Creates an event handler for the vault, starts a watchdog observer
+    with recursive monitoring, and schedules background tasks for event processing,
+    move queue handling, periodic cleanup, and observer heartbeat monitoring.
+    Returns references to all tasks and observer for proper shutdown handling.
+    """
     import asyncio
     from watchdog.observers.api import BaseObserver
  

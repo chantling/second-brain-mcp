@@ -12,7 +12,12 @@ class MetadataExtractor:
     """Metadata extractor using flexible AI provider (any OpenAI-compatible API)"""
     
     def __init__(self):
-        """Initialize metadata extractor"""
+        """Initialize metadata extractor with OpenAI-compatible API client.
+        
+        Loads API key, base URL, and model name from Config. Creates an
+        OpenAI client instance with 240 second timeout and 3 retries for
+        reliability when calling AI services for metadata extraction.
+        """
         self.api_key = Config.METADATA_API_KEY
         self.base_url = Config.METADATA_BASE_URL
         self.model = Config.METADATA_MODEL

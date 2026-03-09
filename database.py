@@ -52,12 +52,19 @@ class DatabaseManager:
     """Database manager for Supabase operations using Supabase Python API"""
 
     def __init__(self):
+        """Initialize database manager with Supabase client configuration.
+        
+        Loads Supabase URL and secret/publish keys from Config.
+        Creates a Supabase client instance for all database operations.
+        The client uses connection pooling for efficient query execution.
+        """
         self.supabase_url = Config.SUPABASE_URL
         self.supabase_secret_key = Config.SUPABASE_SECRET_KEY
         self.supabase_publish_key = Config.SUPABASE_PUBLISH_KEY
 
         # Initialize Supabase client
         self.client: Client = create_client(self.supabase_url, self.supabase_secret_key)
+
 
     async def store_thought(
         self, content: str, embedding: List[float], metadata: Dict
@@ -318,7 +325,12 @@ class DatabaseManager:
             return []
 
     async def close(self):
-        """Close the Supabase client"""
+        """Close and cleanup database resources.
+        
+        The Supabase Python client manages connections automatically through
+        connection pooling, so no explicit cleanup is required. This method
+        is provided for compatibility with resource cleanup patterns.
+        """
         # Supabase Python client doesn't require explicit closing
         # The client manages connections automatically
         pass

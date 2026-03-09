@@ -4,6 +4,7 @@
 
 # Agent files
 .ClineData
+.claude
 
 # Server temp files
 .server_lock

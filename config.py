@@ -160,7 +160,7 @@ class Config:
         blacklisted_items = []
         
         try:
-            with open(Config.BLACKLIST_FILE_PATH, 'r', encoding='utf-8') as f:
+            with open(Config.BLACKLIST_FILE_PATH, "r", encoding="utf-8") as f:
                 for line in f:
                     line_stripped = line.strip()
                     

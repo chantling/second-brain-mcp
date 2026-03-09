@@ -11,7 +11,12 @@ class EmbeddingGenerator:
     """Generate vector embeddings using OpenAI-compatible API (flexible provider)"""
 
     def __init__(self):
-        """Initialize the embedding generator"""
+        """Initialize the embedding generator with OpenAI-compatible API client.
+        
+        Loads API key, base URL, model name, and embedding dimensions from
+        Config. Creates an OpenAI client instance for generating vector
+        embeddings from text content using the configured embedding model.
+        """
         try:
             from openai import OpenAI
 

@@ -13,7 +13,14 @@ class LinkManager:
     """Manage wiki-links, embeds, and backlinks"""
 
     def __init__(self, db_manager: DatabaseManager):
+        """Initialize link manager with database manager dependency.
+        
+        Stores reference to database manager for executing link-related queries.
+        Provides methods for managing wiki-links, embeds, backlinks, and
+        finding related notes through shared connections.
+        """
         self.db_manager = db_manager
+
 
     async def get_backlinks(self, thought_id: int) -> List[Dict]:
         """Get all notes that link to this thought"""

@@ -24,7 +24,13 @@ class ToolHandlers:
     """Handler class for all MCP tool operations"""
 
     async def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> Any:
-        """Route tool calls to appropriate handler"""
+        """Route MCP tool calls to the appropriate handler method.
+        
+        Maps tool names to their corresponding handler methods in this class.
+        Validates that the requested tool exists and invokes it with the provided
+        arguments. Returns the handler's result or an error message if the tool
+        is unknown.
+        """
         # Folder sync now runs at server startup, not on first tool call
         # This eliminates blocking delays on initial tool calls
 
@@ -52,7 +58,12 @@ class ToolHandlers:
         return await handler(**arguments)
 
     async def _sync_folders(self):
-        """Sync folders to database on first tool call"""
+        """Sync Obsidian vault folders to database.
+        
+        Ensures all folders in the vault are represented in the database
+        with embeddings for semantic folder placement. This is called once on
+        server startup rather than on each tool call to avoid delays.
+        """
         try:
             print("[INFO] Syncing Obsidian folders to database...", file=sys.stderr)
             stats = await obsidian_manager.sync_folders_to_database()
@@ -465,7 +476,14 @@ class ToolHandlers:
         source: str,
         duplicate: Optional[Dict] = None,
     ) -> Dict:
-        """Store new thought with optional duplicate warning"""
+        """Store a new thought in both Supabase and Obsidian.
+        
+        Determines the appropriate folder for storage using semantic search if enabled.
+        Computes file hash for change detection. Stores the thought in Supabase
+        database, creates the Obsidian markdown file with frontmatter, and
+        updates the database with the file path. Optionally adds duplicate warnings
+        to the Obsidian note if duplicate information is provided.
+        """
         # Determine folder using semantic search if enabled and folders are synced
         global _folders_synced
         if Config.SEMANTIC_FOLDER_PLACEMENT and _folders_synced:

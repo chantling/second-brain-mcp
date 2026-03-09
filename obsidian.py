@@ -24,6 +24,13 @@ class ObsidianManager:
     """
 
     def __init__(self, vault_path: str, db_manager=None):
+        """Initialize Obsidian vault manager with path and optional database manager.
+        
+        Scans the vault structure to discover all folders, ensures special folders
+        (To-Do, Contacts, Resources/Recipes, ToSort) exist, and stores
+        reference to database manager for syncing operations. Initializes folder
+        embedding caching for semantic folder placement.
+        """
         self.vault_path = Path(vault_path)
         self.all_folders = self._scan_vault_structure()
         self.ensure_special_folders_exist()
