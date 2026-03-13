@@ -33,7 +33,7 @@ class Config:
     # Legacy support (for backward compatibility)
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     ZAI_API_KEY = os.getenv("ZAI_API_KEY")
-    
+
     # Blacklist Configuration
     BLACKLIST_FILE = os.getenv("BLACKLIST_FILE")
     if BLACKLIST_FILE:
@@ -43,7 +43,7 @@ class Config:
         BLACKLIST_FILE_PATH = Path(__file__).parent / ".blacklist"
     IGNORED_PATHS: List[str] = []
     IGNORED_FILES: List[str] = []
-    
+
     # Obsidian Configuration
     OBSIDIAN_VAULT_PATH = os.getenv("OBSIDIAN_VAULT_PATH", "./SecondBrain")
 
@@ -78,7 +78,7 @@ class Config:
     # Instance Lock Configuration
     # Lock file name (used by instance_lock.py to determine lock file location)
     LOCK_FILE_NAME = ".server_lock"
-    
+
     # Use absolute path based on script location to ensure both instances use of same lock file
     # Note: The actual path is determined by instance_lock.py using os.path.abspath(__file__)
     # This ensures lock file is always in the same directory as the running script
@@ -100,10 +100,15 @@ class Config:
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     DEBUG_VERBOSE = os.getenv("DEBUG_VERBOSE", "false").lower() == "true"
 
+    _validated = False
+
     # Validation
     @classmethod
     def validate(cls):
         """Validate that all required environment variables are set"""
+        if cls._validated:
+            return
+        cls._validated = True
         required_vars = ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "SUPABASE_PUBLISH_KEY"]
 
         missing_vars = []
@@ -139,37 +144,43 @@ class Config:
             )
 
         print("[OK] All configuration validated successfully", file=sys.stderr)
-    
+
     @classmethod
     def _parse_list_var(cls, value: str) -> List[str]:
         """Parse comma-separated list from .env"""
         if not value:
             return []
         return [item.strip() for item in value.split(",") if item.strip()]
-    
+
     @classmethod
     def _load_blacklist(cls) -> List[str]:
         """Load blacklist from .blacklist file
-        
+
         Returns: List of blacklisted paths and filenames (one per line, supports comments)
         """
         if not Config.BLACKLIST_FILE_PATH or not Config.BLACKLIST_FILE_PATH.exists():
-            print(f"[CONFIG] No blacklist file found at: {Config.BLACKLIST_FILE_PATH}", file=sys.stderr)
+            print(
+                f"[CONFIG] No blacklist file found at: {Config.BLACKLIST_FILE_PATH}",
+                file=sys.stderr,
+            )
             return []
-        
+
         blacklisted_items = []
-        
+
         try:
             with open(Config.BLACKLIST_FILE_PATH, "r", encoding="utf-8") as f:
                 for line in f:
                     line_stripped = line.strip()
-                    
-                    if not line_stripped or line_stripped.startswith('#'):
+
+                    if not line_stripped or line_stripped.startswith("#"):
                         continue
-                    
+
                     blacklisted_items.append(line_stripped)
-            
-            print(f"[CONFIG] Loaded {len(blacklisted_items)} items from blacklist", file=sys.stderr)
+
+            print(
+                f"[CONFIG] Loaded {len(blacklisted_items)} items from blacklist",
+                file=sys.stderr,
+            )
             return blacklisted_items
         except Exception as e:
             print(f"[CONFIG] Failed to load blacklist: {e}", file=sys.stderr)
@@ -191,7 +202,7 @@ class Config:
 
         for item in blacklist_items:
             # Skip comments and empty lines (already handled in _load_blacklist)
-            if not item or item.startswith('#'):
+            if not item or item.startswith("#"):
                 continue
 
             # Check if it's a path or file
@@ -199,11 +210,11 @@ class Config:
             # If it contains . and doesn't have /, it's a file
             item_stripped = item.strip()
 
-            if item_stripped.endswith('/') or '.' not in item_stripped:
-                ignored_paths.append(item_stripped.rstrip('/'))
+            if item_stripped.endswith("/") or "." not in item_stripped:
+                ignored_paths.append(item_stripped.rstrip("/"))
             else:
                 # Extract just filename if path provided
-                if '/' in item_stripped:
+                if "/" in item_stripped:
                     filename = Path(item_stripped).name
                     ignored_files.append(filename)
                 else:
@@ -226,8 +237,11 @@ class Config:
         cls.IGNORED_FILES = sorted(list(set(ignored_files)))
 
         if Config.DEBUG:
-            print(f"[CONFIG] Initialized blacklists: {len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files", file=sys.stderr)
-            if hasattr(Config, 'DEBUG_VERBOSE') and Config.DEBUG_VERBOSE:
+            print(
+                f"[CONFIG] Initialized blacklists: {len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files",
+                file=sys.stderr,
+            )
+            if hasattr(Config, "DEBUG_VERBOSE") and Config.DEBUG_VERBOSE:
                 print(f"[CONFIG] IGNORED_PATHS: {cls.IGNORED_PATHS}", file=sys.stderr)
                 print(f"[CONFIG] IGNORED_FILES: {cls.IGNORED_FILES}", file=sys.stderr)
 
@@ -237,5 +251,8 @@ class Config:
     @staticmethod
     def validate():
         """Validate configuration and initialize blacklists"""
+        if Config._validated:
+            return
+        Config._validated = True
         # Call _initialize_blacklists to populate IGNORED_PATHS and IGNORED_FILES
         Config._initialize_blacklists()

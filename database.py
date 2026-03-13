@@ -53,7 +53,7 @@ class DatabaseManager:
 
     def __init__(self):
         """Initialize database manager with Supabase client configuration.
-        
+
         Loads Supabase URL and secret/publish keys from Config.
         Creates a Supabase client instance for all database operations.
         The client uses connection pooling for efficient query execution.
@@ -65,7 +65,6 @@ class DatabaseManager:
         # Initialize Supabase client
         self.client: Client = create_client(self.supabase_url, self.supabase_secret_key)
 
-
     async def store_thought(
         self, content: str, embedding: List[float], metadata: Dict
     ) -> int:
@@ -73,15 +72,15 @@ class DatabaseManager:
         obsidian_path = metadata.get("obsidian_path", "")
         file_hash = metadata.get("file_hash", "")
         source = metadata.get("source", "manual")
-        
+
         # Log the insertion attempt
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         log_msg = f"[{ts}] [DB:INSERT] ↓↓↓ STORE_THOUGHT called ↓↓↓ path={obsidian_path}, hash={file_hash[:8] if file_hash else 'NONE'}..., source={source}"
         debug_log_to_file(log_msg)
-        
+
         log_msg = f"[{ts}] [DB:INSERT] Inserting new entry: path={obsidian_path}, hash={file_hash[:8] if file_hash else 'NONE'}..., source={source}"
         debug_log_to_file(log_msg)
-        
+
         thought_data = {
             "content": content,
             "embedding": embedding,
@@ -109,7 +108,7 @@ class DatabaseManager:
             raise Exception(f"Failed to store thought: {response}")
 
         created_id = response.data[0]["id"]
-        
+
         # Log successful insertion with returned ID
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         log_msg = f"[{ts}] [DB:INSERT] ✓✓✓ SUCCESS ✓✓✓: New entry created with ID={created_id} for path={obsidian_path}"
@@ -131,13 +130,16 @@ class DatabaseManager:
                         {"query_embedding": query_embedding, "match_count": limit},
                     ).execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             if response.data:
                 return response.data
         except asyncio.TimeoutError:
-            print(f"[ERROR] semantic_search timeout after {Config.DB_TIMEOUT}s (RPC)", file=sys.stderr)
+            print(
+                f"[ERROR] semantic_search timeout after {Config.DB_TIMEOUT}s (RPC)",
+                file=sys.stderr,
+            )
         except Exception as e:
             print(f"[WARNING] semantic_search RPC failed: {e}", file=sys.stderr)
 
@@ -161,15 +163,20 @@ class DatabaseManager:
                 asyncio.to_thread(
                     self.client.rpc("execute_sql", {"query": query}).execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             if response.data:
                 return response.data
         except asyncio.TimeoutError:
-            print(f"[ERROR] semantic_search timeout after {Config.DB_TIMEOUT}s (SQL fallback)", file=sys.stderr)
+            print(
+                f"[ERROR] semantic_search timeout after {Config.DB_TIMEOUT}s (SQL fallback)",
+                file=sys.stderr,
+            )
         except Exception as e:
-            print(f"[WARNING] semantic_search SQL fallback failed: {e}", file=sys.stderr)
+            print(
+                f"[WARNING] semantic_search SQL fallback failed: {e}", file=sys.stderr
+            )
 
         # Final fallback: return recent thoughts if vector search not available
         try:
@@ -183,7 +190,7 @@ class DatabaseManager:
                     .limit(limit)
                     .execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             if not response.data:
@@ -196,10 +203,15 @@ class DatabaseManager:
 
             return results
         except asyncio.TimeoutError:
-            print(f"[ERROR] semantic_search timeout after {Config.DB_TIMEOUT}s (recent fallback)", file=sys.stderr)
+            print(
+                f"[ERROR] semantic_search timeout after {Config.DB_TIMEOUT}s (recent fallback)",
+                file=sys.stderr,
+            )
             return []
         except Exception as e:
-            print(f"[ERROR] semantic_search recent fallback failed: {e}", file=sys.stderr)
+            print(
+                f"[ERROR] semantic_search recent fallback failed: {e}", file=sys.stderr
+            )
             return []
 
     async def get_thought(self, thought_id: int) -> Optional[Dict]:
@@ -208,7 +220,7 @@ class DatabaseManager:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for supabase_id={thought_id}"
             debug_log_to_file(log_msg)
-            
+
             response = (
                 self.client.table("thoughts").select("*").eq("id", thought_id).execute()
             )
@@ -248,7 +260,7 @@ class DatabaseManager:
 
         response = await asyncio.wait_for(
             asyncio.to_thread(query.order("created_at", desc=True).execute),
-            timeout=Config.DB_TIMEOUT
+            timeout=Config.DB_TIMEOUT,
         )
 
         if not response.data:
@@ -270,7 +282,7 @@ class DatabaseManager:
                     .limit(limit)
                     .execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             if not response.data:
@@ -278,7 +290,10 @@ class DatabaseManager:
 
             return response.data
         except asyncio.TimeoutError:
-            print(f"[ERROR] search_by_topic timeout after {Config.DB_TIMEOUT}s", file=sys.stderr)
+            print(
+                f"[ERROR] search_by_topic timeout after {Config.DB_TIMEOUT}s",
+                file=sys.stderr,
+            )
             return []
         except Exception as e:
             print(f"[ERROR] search_by_topic failed: {e}", file=sys.stderr)
@@ -297,7 +312,7 @@ class DatabaseManager:
                     .order("created_at", desc=True)
                     .execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             if not response.data:
@@ -310,14 +325,23 @@ class DatabaseManager:
             if completed:
                 results = [r for r in results if r.get("metadata", {}).get("completed")]
             else:
-                results = [r for r in results if not r.get("metadata", {}).get("completed")]
+                results = [
+                    r for r in results if not r.get("metadata", {}).get("completed")
+                ]
 
-            _log(f"[DB:GET_TODOS] Retrieved {len(results)} todos (completed={completed})", "GET_TODOS")
+            _log(
+                f"[DB:GET_TODOS] Retrieved {len(results)} todos (completed={completed})",
+                "GET_TODOS",
+            )
             return results
 
         except asyncio.TimeoutError:
-            _log(f"[DB:GET_TODOS] ERROR: Timeout after {Config.DB_TIMEOUT}s", "GET_TODOS")
-            print(f"[ERROR] get_todos timeout after {Config.DB_TIMEOUT}s", file=sys.stderr)
+            _log(
+                f"[DB:GET_TODOS] ERROR: Timeout after {Config.DB_TIMEOUT}s", "GET_TODOS"
+            )
+            print(
+                f"[ERROR] get_todos timeout after {Config.DB_TIMEOUT}s", file=sys.stderr
+            )
             return []
         except Exception as e:
             _log(f"[DB:GET_TODOS] ERROR: {str(e)}", "GET_TODOS")
@@ -326,7 +350,7 @@ class DatabaseManager:
 
     async def close(self):
         """Close and cleanup database resources.
-        
+
         The Supabase Python client manages connections automatically through
         connection pooling, so no explicit cleanup is required. This method
         is provided for compatibility with resource cleanup patterns.
@@ -376,7 +400,10 @@ class DatabaseManager:
                 # Only generate embedding if None (defensive fallback)
                 embedding = folder_info.get("embedding")
                 if embedding is None:
-                    print(f"[WARNING] No embedding provided for {path}, generating...", file=sys.stderr)
+                    print(
+                        f"[WARNING] No embedding provided for {path}, generating...",
+                        file=sys.stderr,
+                    )
                     embedding = await embedding_manager.create_embedding(
                         folder_info["description"]
                     )
@@ -539,11 +566,11 @@ class DatabaseManager:
         """Find thought by Obsidian file path"""
         try:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            
+
             # Log the lookup attempt
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for obsidian_path={obsidian_path}"
             debug_log_to_file(log_msg)
-            
+
             response = (
                 self.client.table("thoughts")
                 .select("*")
@@ -553,17 +580,45 @@ class DatabaseManager:
 
             if response.data:
                 found_id = response.data[0]["id"]
-                found_hash = response.data[0].get("file_hash", "")[:8] if response.data[0].get("file_hash") else "NONE"
+                found_hash = (
+                    response.data[0].get("file_hash", "")[:8]
+                    if response.data[0].get("file_hash")
+                    else "NONE"
+                )
                 log_msg = f"[{ts}] [DB:LOOKUP] ✓ FOUND: ID={found_id}, hash={found_hash}... for obsidian_path={obsidian_path}"
                 debug_log_to_file(log_msg)
                 return response.data[0]
             else:
-                log_msg = f"[{ts}] [DB:LOOKUP] ✗ NOT FOUND: obsidian_path={obsidian_path}"
+                log_msg = (
+                    f"[{ts}] [DB:LOOKUP] ✗ NOT FOUND: obsidian_path={obsidian_path}"
+                )
                 debug_log_to_file(log_msg)
                 return None
         except Exception as e:
             print(f"[WARNING] Failed to get thought by path: {e}", file=sys.stderr)
             return None
+
+    async def delete_thought_by_obsidian_path(self, obsidian_path: str) -> bool:
+        """Delete thought by Obsidian file path"""
+        _log(
+            f"[DB:DELETE] Deleting thought by obsidian_path: {obsidian_path}", "DELETE"
+        )
+        try:
+            thought = await self.get_thought_by_obsidian_path(obsidian_path)
+            if thought:
+                return await self.delete_thought_by_id(thought["id"])
+            else:
+                _log(
+                    f"[DB:DELETE] No entry found for obsidian_path: {obsidian_path}",
+                    "DELETE",
+                )
+                return False
+        except Exception as e:
+            _log(
+                f"[DB:DELETE] ERROR deleting thought by obsidian_path {obsidian_path}: {e}",
+                "DELETE",
+            )
+            return False
 
     async def get_all_thoughts(self) -> List[Dict]:
         """Get all thoughts from database (for orphan verification)"""
@@ -581,24 +636,24 @@ class DatabaseManager:
         """Delete thought by ID"""
         _log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
         try:
-            #_log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
+            # _log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
             # Delete related links
             self.client.table("links").delete().eq(
                 "source_thought_id", thought_id
             ).execute()
-            
+
             self.client.table("links").delete().eq(
                 "target_thought_id", thought_id
             ).execute()
-            
+
             # Delete tag associations
             self.client.table("thought_tags").delete().eq(
                 "thought_id", thought_id
             ).execute()
-            
+
             # Delete thought
             self.client.table("thoughts").delete().eq("id", thought_id).execute()
-            
+
             _log(f"[DB:DELETE] Successfully deleted thought ID: {thought_id}", "DELETE")
             return True
         except Exception as e:
@@ -687,7 +742,7 @@ class DatabaseManager:
         # Safely get metadata fields
         video_id = metadata.get("video_id") if metadata else None
         url = metadata.get("url") if metadata else None
-        
+
         # Tier 1: Exact video_id match (highest priority)
         if video_id:
             try:
@@ -786,13 +841,16 @@ class DatabaseManager:
         try:
             # Delete folder entry from database
             response = (
-                self.client.table("folders").delete().eq("folder_path", folder_path).execute()
+                self.client.table("folders")
+                .delete()
+                .eq("folder_path", folder_path)
+                .execute()
             )
-            
+
             if not response.data:
                 _log(f"[DB:DELETE] No folder found at path: {folder_path}", "DELETE")
                 return False
-            
+
             _log(f"[DB:DELETE] Successfully deleted folder: {folder_path}", "DELETE")
             return True
         except Exception as e:
@@ -861,12 +919,14 @@ class DatabaseManager:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.client.table("thoughts")
-                    .select("id, content, thought_type, topics, obsidian_path, created_at")
+                    .select(
+                        "id, content, thought_type, topics, obsidian_path, created_at"
+                    )
                     .ilike("content", f"%{query}%")
                     .limit(limit)
                     .execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             # Add score based on position
@@ -877,7 +937,10 @@ class DatabaseManager:
 
             return results
         except asyncio.TimeoutError:
-            print(f"[ERROR] keyword_search timeout after {Config.DB_TIMEOUT}s", file=sys.stderr)
+            print(
+                f"[ERROR] keyword_search timeout after {Config.DB_TIMEOUT}s",
+                file=sys.stderr,
+            )
             return []
         except Exception as e:
             print(f"[WARNING] Failed keyword search: {e}", file=sys.stderr)
@@ -891,13 +954,15 @@ class DatabaseManager:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.client.table("thoughts")
-                    .select("id, content, thought_type, topics, obsidian_path, created_at")
+                    .select(
+                        "id, content, thought_type, topics, obsidian_path, created_at"
+                    )
                     .filter("content_tsv", "fts", query)
                     .order("created_at", desc=True)
                     .limit(limit)
                     .execute
                 ),
-                timeout=Config.DB_TIMEOUT
+                timeout=Config.DB_TIMEOUT,
             )
 
             # Add score based on position (simplified ranking)
@@ -908,7 +973,10 @@ class DatabaseManager:
 
             return results
         except asyncio.TimeoutError:
-            print(f"[ERROR] fulltext_search timeout after {Config.DB_TIMEOUT}s", file=sys.stderr)
+            print(
+                f"[ERROR] fulltext_search timeout after {Config.DB_TIMEOUT}s",
+                file=sys.stderr,
+            )
             return []
         except Exception as e:
             print(f"[WARNING] Full-text search failed: {e}", file=sys.stderr)
@@ -1076,7 +1144,14 @@ def transform_metadata_for_database(metadata: Dict) -> Dict:
         result["thought_type"] = "knowledge"
 
     # Extract standard fields
-    standard_fields = ["topics", "people", "action_items", "obsidian_path", "source", "file_hash"]
+    standard_fields = [
+        "topics",
+        "people",
+        "action_items",
+        "obsidian_path",
+        "source",
+        "file_hash",
+    ]
     for field in standard_fields:
         if field in metadata:
             result[field] = metadata[field]

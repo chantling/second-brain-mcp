@@ -25,7 +25,7 @@ class ObsidianManager:
 
     def __init__(self, vault_path: str, db_manager=None):
         """Initialize Obsidian vault manager with path and optional database manager.
-        
+
         Scans the vault structure to discover all folders, ensures special folders
         (To-Do, Contacts, Resources/Recipes, ToSort) exist, and stores
         reference to database manager for syncing operations. Initializes folder
@@ -469,9 +469,15 @@ class ObsidianManager:
         if self._is_cache_valid():
             print("[INFO] Using valid local folder cache", file=sys.stderr)
             folder_embeddings = self._load_folder_embeddings_cache()
-            print(f"[INFO] Loaded {len(folder_embeddings)} embeddings from local cache", file=sys.stderr)
+            print(
+                f"[INFO] Loaded {len(folder_embeddings)} embeddings from local cache",
+                file=sys.stderr,
+            )
         else:
-            print("[INFO] Local cache invalid or missing, will query database", file=sys.stderr)
+            print(
+                "[INFO] Local cache invalid or missing, will query database",
+                file=sys.stderr,
+            )
 
         # Scan folders and build folder_data
         folders_to_process = []
@@ -487,7 +493,10 @@ class ObsidianManager:
                 if rel_path in folder_embeddings:
                     embedding = folder_embeddings[rel_path]
                     if DEBUG:
-                        print(f"[DEBUG] Using cached embedding for {rel_path}", file=sys.stderr)
+                        print(
+                            f"[DEBUG] Using cached embedding for {rel_path}",
+                            file=sys.stderr,
+                        )
                 else:
                     embedding = None
                     folders_to_process.append(rel_path)
@@ -511,11 +520,18 @@ class ObsidianManager:
         folders_to_generate = []
 
         if folders_to_process:
-            print(f"[INFO] Fetching {len(folders_to_process)} folder embeddings from database...", file=sys.stderr)
+            print(
+                f"[INFO] Fetching {len(folders_to_process)} folder embeddings from database...",
+                file=sys.stderr,
+            )
 
             try:
                 # Query DB for all folders at once (Option A: batch query)
-                response = self.db_manager.client.table("folders").select("path, embedding").execute()
+                response = (
+                    self.db_manager.client.table("folders")
+                    .select("path, embedding")
+                    .execute()
+                )
 
                 if response.data:
                     for db_folder in response.data:
@@ -537,19 +553,33 @@ class ObsidianManager:
                                 if folder_info["path"] == path:
                                     folder_info["embedding"] = embedding
                                     if DEBUG:
-                                        print(f"[DEBUG] Fetched embedding from DB for {path}", file=sys.stderr)
+                                        print(
+                                            f"[DEBUG] Fetched embedding from DB for {path}",
+                                            file=sys.stderr,
+                                        )
                                     break
 
                     # Remove folders we found in database
-                    folders_to_generate = [f for f in folders_to_process if f not in folder_embeddings]
+                    folders_to_generate = [
+                        f for f in folders_to_process if f not in folder_embeddings
+                    ]
 
-                    print(f"[INFO] Found {len(folders_to_process) - len(folders_to_generate)} folders in database", file=sys.stderr)
+                    print(
+                        f"[INFO] Found {len(folders_to_process) - len(folders_to_generate)} folders in database",
+                        file=sys.stderr,
+                    )
                 else:
-                    print("[WARNING] Database query returned no data, will generate all embeddings", file=sys.stderr)
+                    print(
+                        "[WARNING] Database query returned no data, will generate all embeddings",
+                        file=sys.stderr,
+                    )
                     folders_to_generate = folders_to_process[:]
 
             except Exception as e:
-                print(f"[ERROR] Database query failed: {e}, generating all embeddings", file=sys.stderr)
+                print(
+                    f"[ERROR] Database query failed: {e}, generating all embeddings",
+                    file=sys.stderr,
+                )
                 # Fallback: treat all folders as needing generation
                 folders_to_generate = folders_to_process[:]
         else:
@@ -557,20 +587,31 @@ class ObsidianManager:
 
         # Phase 3: Generate embeddings for folders not in cache or DB
         if folders_to_generate:
-            print(f"[INFO] Generating embeddings for {len(folders_to_generate)} folders...", file=sys.stderr)
+            print(
+                f"[INFO] Generating embeddings for {len(folders_to_generate)} folders...",
+                file=sys.stderr,
+            )
 
             from embeddings import EmbeddingGenerator
+
             embedding_manager = EmbeddingGenerator()
 
             for folder_path in folders_to_generate:
                 try:
-                    folder_info = next((f for f in folders_data if f["path"] == folder_path), None)
+                    folder_info = next(
+                        (f for f in folders_data if f["path"] == folder_path), None
+                    )
                     if folder_info:
-                        embedding = await embedding_manager.create_embedding(folder_info["description"])
+                        embedding = await embedding_manager.create_embedding(
+                            folder_info["description"]
+                        )
                         folder_info["embedding"] = embedding
                         folder_embeddings[folder_path] = embedding
                 except Exception as e:
-                    print(f"[ERROR] Failed to generate embedding for {folder_path}: {e}", file=sys.stderr)
+                    print(
+                        f"[ERROR] Failed to generate embedding for {folder_path}: {e}",
+                        file=sys.stderr,
+                    )
 
             await embedding_manager.close()
         else:
@@ -578,7 +619,10 @@ class ObsidianManager:
 
         # Phase 4: Sync to database with pre-computed embeddings
         if folders_data:
-            print(f"[INFO] Syncing {len(folders_data)} folders to database...", file=sys.stderr)
+            print(
+                f"[INFO] Syncing {len(folders_data)} folders to database...",
+                file=sys.stderr,
+            )
             stats = await self.db_manager.sync_folders(folders_data)
             print(
                 f"[INFO] Folder sync complete: {stats['created']} created, {stats['updated']} updated, {stats.get('skipped', 0)} skipped",
@@ -591,7 +635,10 @@ class ObsidianManager:
                 )
 
             # Phase 5: Save updated cache (includes all: local + DB + newly generated)
-            print(f"[INFO] Saving {len(folder_embeddings)} folder embeddings to local cache...", file=sys.stderr)
+            print(
+                f"[INFO] Saving {len(folder_embeddings)} folder embeddings to local cache...",
+                file=sys.stderr,
+            )
             self._save_folder_embeddings_cache(folder_embeddings)
             print(
                 f"[INFO] Saved {len(folder_embeddings)} folder embeddings to local cache",
@@ -1146,16 +1193,18 @@ class ObsidianManager:
 
         return make_json_serializable(data)
 
-    async def remove_orphaned_supabase_entries(self, exclude_ids: Optional[List[int]] = None):
+    async def remove_orphaned_supabase_entries(
+        self, exclude_ids: Optional[List[int]] = None
+    ):
         """
         Verify and update orphaned Supabase entries.
-        
+
         Handles:
         1. Entries with no obsidian_path - delete them
         2. Entries where file was moved - update the obsidian_path
         3. Entries where file was deleted - delete them
         4. Entries where file exists but has mismatched supabase_id - delete them
-        
+
         exclude_ids: List of entry IDs created in current sync cycle (don't delete these)
                   Used to prevent race condition where orphan cleanup deletes
                   entries that were just created in sync_existing_notes_to_supabase()
@@ -1196,11 +1245,11 @@ class ObsidianManager:
             # Check each entry
             for entry in all_entries:
                 thought_id = entry.get("id")
-                
+
                 # Skip entries created in current sync cycle
                 if thought_id in exclude_ids:
                     continue
-                
+
                 obsidian_path = entry.get("obsidian_path", "")
 
                 # Case 1: Entry has empty or missing obsidian_path
@@ -1240,7 +1289,7 @@ class ObsidianManager:
                 else:
                     # Case 3: File exists at stored path - verify supabase_id matches
                     file_supabase_id = path_to_supabase_id.get(obsidian_path)
-                    
+
                     if file_supabase_id is None:
                         # File has no supabase_id - orphaned
                         await self.db_manager.delete_thought_by_id(thought_id)
@@ -1287,21 +1336,24 @@ class ObsidianManager:
         import sys
         from embeddings import EmbeddingGenerator
         from metadata import MetadataExtractor
-        
+
         if Config.DEBUG:
-            print(f"[SYNC] DEBUG={Config.DEBUG}, will enable debug logging", file=sys.stderr)
+            print(
+                f"[SYNC] DEBUG={Config.DEBUG}, will enable debug logging",
+                file=sys.stderr,
+            )
 
         # Note: We don't run orphan cleanup here to avoid race conditions
         # Orphan cleanup is called separately (e.g., on server startup)
-        
+
         # Collect all markdown files in vault
         markdown_files = list(self.vault_path.rglob("*.md"))
-        
+
         synced_count = 0
         skipped_count = 0
         error_count = 0
         created_ids = []
-        
+
         embedding_generator = EmbeddingGenerator()
         metadata_extractor = MetadataExtractor()
 
@@ -1322,10 +1374,8 @@ class ObsidianManager:
                 file_rel_path = str(md_file.relative_to(self.vault_path))
                 if Config.DEBUG:
                     print(f"[SYNC] Processing file: {file_rel_path}", file=sys.stderr)
-                
-                metadata = self._extract_frontmatter(
-                    content, file_rel_path
-                )
+
+                metadata = self._extract_frontmatter(content, file_rel_path)
 
                 # Check if note has a supabase_id in frontmatter
                 # If so, verify it still exists in database
@@ -1357,7 +1407,7 @@ class ObsidianManager:
                             f"[SYNC] Error checking supabase_id {supabase_id}: {e}, re-syncing...",
                             file=sys.stderr,
                         )
-                
+
                 # Check if already in Supabase by path (but no frontmatter)
                 # This handles case where DB entry exists but file doesn't have frontmatter
                 if self.db_manager:
@@ -1391,12 +1441,15 @@ class ObsidianManager:
                 if self.db_manager:
                     if Config.DEBUG:
                         print(f"[SYNC] db_manager is set: True", file=sys.stderr)
-                        print(f"[SYNC] Storing with obsidian_path={rel_path}", file=sys.stderr)
-                    
+                        print(
+                            f"[SYNC] Storing with obsidian_path={rel_path}",
+                            file=sys.stderr,
+                        )
+
                     # Transform metadata to database format
                     # This handles: 'type' → 'thought_type', extra fields → metadata JSONB
                     transformed_metadata = transform_metadata_for_database(metadata)
-                    
+
                     # Add required fields for sync operations
                     store_metadata = {
                         **transformed_metadata,
@@ -1405,27 +1458,35 @@ class ObsidianManager:
                         "source": "obsidian_import",
                     }
                     if Config.DEBUG:
-                        print(f"[SYNC] store_metadata={store_metadata}", file=sys.stderr)
+                        print(
+                            f"[SYNC] store_metadata={store_metadata}", file=sys.stderr
+                        )
                     supabase_id = await self.db_manager.store_thought(
                         content,
                         embedding,
                         store_metadata,
                     )
                     if Config.DEBUG:
-                        print(f"[SYNC] Stored with supabase_id={supabase_id}", file=sys.stderr)
-                    
+                        print(
+                            f"[SYNC] Stored with supabase_id={supabase_id}",
+                            file=sys.stderr,
+                        )
+
                     # Update frontmatter with supabase_id
                     self._update_frontmatter(md_file, supabase_id)
                 else:
                     if Config.DEBUG:
-                        print(f"[SYNC] db_manager is NOT set, skipping store", file=sys.stderr)
-                    
+                        print(
+                            f"[SYNC] db_manager is NOT set, skipping store",
+                            file=sys.stderr,
+                        )
+
                     # Verify path was set (should be in metadata above, but ensure it's in DB)
                     await self.db_manager.update_obsidian_path(supabase_id, rel_path)
-                    
+
                     # Track created entry IDs for orphan cleanup exclusion
                     created_ids.append(supabase_id)
-                    
+
                     synced_count += 1
 
                     if synced_count % 10 == 0:
@@ -1444,12 +1505,12 @@ class ObsidianManager:
             f"[SYNC] Initial sync complete: {synced_count} synced, {skipped_count} skipped, {error_count} errors",
             file=sys.stderr,
         )
-        
+
         return {"created": synced_count, "ids": created_ids}
-    
+
     def get_last_sync_result(self):
         """Get the result from the last sync operation
-        
+
         Returns: Dict with 'created' (count) and 'ids' (list of entry IDs)
         """
         return self._last_sync_result
@@ -1511,11 +1572,11 @@ class ObsidianManager:
                             )
 
                         embedding = await embedding_generator.create_embedding(content)
-                        
+
                         # Transform metadata to database format
                         # This handles: 'type' → 'thought_type', extra fields → metadata JSONB
                         transformed_metadata = transform_metadata_for_database(metadata)
-                        
+
                         # Add required fields for sync operations
                         store_metadata = {
                             **transformed_metadata,
@@ -1574,61 +1635,68 @@ class ObsidianManager:
                 file=sys.stderr,
             )
             return
-        
+
         try:
             content = file_path.read_text(encoding="utf-8")
             lines = content.split("\n")
-            
+
             if not lines or lines[0].strip() != "---":
                 # No frontmatter, add it
                 frontmatter_block = f"---\nsupabase_id: {supabase_id}\n---\n\n"
                 new_content = frontmatter_block + content
                 file_path.write_text(new_content, encoding="utf-8")
                 return
-            
-            # Find the CLOSING --- of the frontmatter block (not the first occurrence)
-            # Use depth counting to handle files with --- in their content (copilot case)
+
+            # Find the CLOSING --- of the frontmatter block
+            # The opening --- is at lines[0], so find the next --- line for the closing tag
             frontmatter_end_idx = -1
-            depth = 0
             for i in range(1, len(lines)):
-                if "---" in lines[i]:
-                    depth += 1
-                    if depth == 2:
-                        frontmatter_end_idx = i
-                        break
-            
+                if lines[i].strip() == "---":
+                    frontmatter_end_idx = i
+                    break
+
             if frontmatter_end_idx == -1:
-                # Malformed frontmatter (no closing ---), just append
-                frontmatter = f"---\n{lines[0]}\n---\n"
-                new_content = frontmatter + content
-                file_path.write_text(new_content, encoding="utf-8")
+                # Malformed frontmatter (no closing ---), don't modify
                 return
-            
+
             # Extract frontmatter lines (between first --- and closing ---)
             frontmatter_lines = lines[1:frontmatter_end_idx]
             frontmatter_str = "\n".join(frontmatter_lines)
-            
+
             # Parse existing frontmatter as YAML
             try:
                 frontmatter_dict = yaml.safe_load(frontmatter_str) or {}
             except yaml.YAMLError as e:
-                print(f"[WARNING] Failed to parse frontmatter as YAML: {e}", file=sys.stderr)
+                print(
+                    f"[WARNING] Failed to parse frontmatter as YAML: {e}",
+                    file=sys.stderr,
+                )
                 frontmatter_dict = {}
-            
+
             # Update or add supabase_id
             frontmatter_dict["supabase_id"] = supabase_id
-            
+
             # Convert back to YAML string (preserving formatting)
             try:
-                updated_frontmatter = yaml.dump(frontmatter_dict, default_flow_style=False, sort_keys=False, allow_unicode=True).rstrip()
+                updated_frontmatter = yaml.dump(
+                    frontmatter_dict,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                ).rstrip()
             except yaml.YAMLError as e:
-                print(f"[WARNING] Failed to convert frontmatter to YAML: {e}", file=sys.stderr)
+                print(
+                    f"[WARNING] Failed to convert frontmatter to YAML: {e}",
+                    file=sys.stderr,
+                )
                 return
-            
+
             # Rebuild complete content: opening --- + updated frontmatter + closing --- + rest of file
-            content_after_frontmatter = lines[frontmatter_end_idx + 1:]
-            new_content = f"---\n{updated_frontmatter}---\n\n" + "\n".join(content_after_frontmatter)
-            
+            content_after_frontmatter = lines[frontmatter_end_idx + 1 :]
+            new_content = f"---\n{updated_frontmatter}\n---\n\n" + "\n".join(
+                content_after_frontmatter
+            )
+
             file_path.write_text(new_content, encoding="utf-8")
         except Exception as e:
             print(f"[ERROR] Failed to update frontmatter: {e}", file=sys.stderr)
