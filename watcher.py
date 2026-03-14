@@ -845,69 +845,21 @@ class ObsidianEventHandler(FileSystemEventHandler):
             )
             return False
 
-        for blacklisted_item in Config.IGNORED_PATHS:
-            if self._is_path_blacklisted(rel_path, src_path, blacklisted_item):
-                _log(
-                    f"[SHOULD_PROCESS] FILTERED: Blacklisted path: {rel_path} (pattern: {blacklisted_item})",
-                    "FILTER",
+        matched_pattern = Config.is_blacklisted(rel_path, src_path)
+        if matched_pattern:
+            _log(
+                f"[SHOULD_PROCESS] FILTERED: Blacklisted path: {rel_path} (matched: {matched_pattern})",
+                "FILTER",
+            )
+            if Config.DEBUG:
+                print(
+                    f"[SKIP] Ignoring blacklisted path: {rel_path} (matched: {matched_pattern})",
+                    file=sys.stderr,
                 )
-                if Config.DEBUG:
-                    print(
-                        f"[SKIP] Ignoring path in ignore list: {rel_path}",
-                        file=sys.stderr,
-                    )
-                return False
-        for blacklisted_file in Config.IGNORED_FILES:
-            filename = Path(src_path).name
-            if filename == blacklisted_file or filename.startswith(blacklisted_file):
-                _log(
-                    f"[SHOULD_PROCESS] FILTERED: Blacklisted file: {filename} (pattern: {blacklisted_file})",
-                    "FILTER",
-                )
-                if Config.DEBUG:
-                    print(
-                        f"[SKIP] Ignoring file in ignore list: {filename}",
-                        file=sys.stderr,
-                    )
-                return False
+            return False
 
         _log(f"[SHOULD_PROCESS] PASSED: Will process this event", "FILTER")
         return True
-
-    def _is_path_blacklisted(self, rel_path: str, abs_path: str, pattern: str) -> bool:
-        """Check if path matches a blacklist pattern
-
-        Supports:
-        - Relative paths: copilot, Resources/Temp
-        - Absolute paths: C:\\Users\\...\\Archive
-        - Nested folders: -To-Do-\\secrets
-        - Filenames: Untitled.md
-
-        Returns: True if blacklisted
-        """
-        # Convert to consistent path format (forward slashes, lowercase for case-insensitive matching)
-        rel_normalized = rel_path.replace("\\", "/").lower()
-        abs_normalized = abs_path.replace("\\", "/").lower()
-        pattern_normalized = pattern.replace("\\", "/").lower()
-
-        # Exact filename match (for files like Untitled.md)
-        filename = Path(abs_path).name.lower()
-        if filename == pattern_normalized or filename == Path(pattern_normalized).name:
-            return True
-
-        # Relative path prefix match (e.g., copilot matches copilot/custom-prompts/file.md)
-        if rel_normalized.startswith(pattern_normalized + "/"):
-            return True
-
-        # Absolute path match
-        if abs_normalized.startswith(pattern_normalized + "/"):
-            return True
-
-        # Nested folder match (pattern: -To-Do-\\secrets matches -To-Do-\\secrets/sub)
-        if pattern_normalized in rel_normalized:
-            return True
-
-        return False
 
     async def _debounce_event(self, file_path: str, event_type: str):
         """Debounce rapid successive events for the same file.
@@ -2109,61 +2061,6 @@ async def _blacklist_watch_loop():
             print(f"[ERROR] Blacklist watch failed: {e}", file=sys.stderr)
 
 
-def _verify_emitter_health(observer) -> Tuple[str, str]:
-    """Verify the health of the observer's emitter.
-
-    Checks:
-    1. Emitter thread is alive
-    2. Emitter has not been stopped
-    3. Windows API handle exists and is valid
-
-    Returns:
-        Tuple of (status, description)
-            status: "healthy", "stopped", "thread_dead", "no_handle", "no_emitter"
-    """
-
-    # Check 1: Observer exists
-    if observer is None:
-        return "no_observer", "No observer instance found"
-
-    # Check 2: Has emitters
-    emitter_list = list(observer.emitters) if hasattr(observer, "emitters") else []
-    if not emitter_list:
-        return "no_emitter", "Observer has no emitters registered"
-
-    emitter = emitter_list[0]
-
-    # Check 3: Emitter thread is alive
-    if not emitter.is_alive():
-        return (
-            "thread_dead",
-            f"Emitter thread is not alive (alive={emitter.is_alive()})",
-        )
-
-    # Check 4: Emitter has not been stopped
-    if emitter.stopped_event.is_set():
-        return (
-            "stopped",
-            f"Emitter stopped event is set (stopped={emitter.stopped_event.is_set()})",
-        )
-
-    # Check 5: Windows API handle exists (platform-specific)
-    if hasattr(emitter, "_whandle"):
-        handle = emitter._whandle
-        if not handle or handle == 0:
-            return "no_handle", f"Windows API handle is invalid (handle={handle})"
-        _log(f"[HEALTH] Windows API handle: {handle}", "HEALTH")
-    else:
-        _log("[HEALTH] No _whandle attribute (non-Windows platform)", "HEALTH")
-
-    # All checks passed
-    _log(
-        f"[HEALTH] Emitter thread alive: True, stopped_event: False, handle: valid",
-        "HEALTH",
-    )
-    return "healthy", "Emitter appears healthy"
-
-
 def start_file_watcher(
     vault_path: Path,
     event_loop: asyncio.AbstractEventLoop,
@@ -2282,43 +2179,23 @@ def start_file_watcher(
 async def _observer_heartbeat_loop(vault_path: Path):
     """Periodically check if observer is still alive"""
 
-    _last_observer_check = time.time()
-
     while True:
         try:
-            await asyncio.sleep(30)  # Check every 30 seconds
+            await asyncio.sleep(30)
 
-            _last_observer_check = time.time()
-            _log(
-                f"[HEARTBEAT] Observer heartbeat check at {datetime.now().isoformat()}",
-                "HEARTBEAT",
-            )
-
-            # Verify emitter health
             global _observer_instance
-            health_status, health_description = _verify_emitter_health(
-                _observer_instance
-            )
-            _log(
-                f"[HEARTBEAT] Emitter health: {health_status} - {health_description}",
-                "HEARTBEAT",
-            )
-
-            # If emitter is not healthy, log a clear warning
-            if health_status != "healthy":
+            if _observer_instance is None or not _observer_instance.is_alive():
                 print(
-                    f"[WATCHER] ⚠️ EMITTER HEALTH ISSUE: {health_status} - {health_description}",
+                    f"[WATCHER] ⚠️ Observer is not alive, may need restart",
                     file=sys.stderr,
                 )
-
-            # Check if any .md files exist
-            if vault_path.exists():
-                md_files = list(vault_path.rglob("*.md"))
-                _log(f"[HEARTBEAT] Vault has {len(md_files)} .md files", "HEARTBEAT")
             else:
-                _log(
-                    f"[HEARTBEAT] WARNING: Vault path does not exist: {vault_path}",
-                    "HEARTBEAT",
+                _log("[HEARTBEAT] Observer alive", "HEARTBEAT")
+
+            if not vault_path.exists():
+                print(
+                    f"[WATCHER] ⚠️ Vault path does not exist: {vault_path}",
+                    file=sys.stderr,
                 )
 
         except asyncio.CancelledError:

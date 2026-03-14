@@ -1,3 +1,69 @@
-# place files or folders to ignore one per line
-.\!Folder_Embeddings.md
-.\.obsidian
+# ============================================================================
+# .blacklist — Exclude files and folders from the Second Brain MCP server
+# ============================================================================
+#
+# One pattern per line. Lines starting with # are comments.
+# Patterns are case-insensitive. Changes take effect within 30 seconds.
+#
+# ── FOLDERS ──────────────────────────────────────────────────────────────────
+#
+# End with \ or / to mark as a folder. Matches the folder and all contents.
+#
+#   .\copilot          Relative folder in vault root (.\ prefix optional)
+#   copilot            Same as above — bare names are treated as root folders
+#   .\.obsidian        Dot-folder in vault root
+#   Resources\Temp     Nested folder
+#   Test\              Trailing backslash marks it as a folder
+#
+# ── FILES ────────────────────────────────────────────────────────────────────
+#
+# End with a file extension (e.g., .md, .txt, .tmp). Matches by filename.
+#
+#   !Folder_Embeddings.md   Exact filename match (in any folder)
+#   Untitled.md             Any file named Untitled.md
+#   Thumbs.db               System file
+#
+# ── WILDCARDS (*) ────────────────────────────────────────────────────────────
+#
+# The * wildcard matches any characters, including path separators.
+#
+#   *secret*           Any file or folder with "secret" anywhere in the path
+#   *.tmp              Any .tmp file
+#   temp_*.md          Any .md file starting with "temp_"
+#   Resources/*/old    "old" folder at any depth under Resources (matches all contents)
+#   *backup*           Any path containing "backup"
+#
+# ── ABSOLUTE PATHS ───────────────────────────────────────────────────────────
+#
+# Full absolute paths can also be specified. Works for paths both inside
+# and outside the vault root.
+#
+#   C:\Users\John\Documents\#Obsidian#\John\Test   Folder inside vault (same as .\Test)
+#   C:\Users\John\Documents\Archive                Folder outside vault
+#   C:\Users\John\old-notes\file.md                File outside vault
+#
+# Absolute paths inside the vault are equivalent to their relative counterparts
+# but can be useful when generating blacklist entries from scripts or logs.
+#
+# ============================================================================
+# Examples — remove the # to activate
+# ============================================================================
+
+# --- Folders ---
+#.\copilot
+#.\.obsidian
+#.\.ClineData
+#.\.trash
+#Test\
+#Resources\Temp
+
+# --- Files ---
+#!Folder_Embeddings.md
+#Thumbs.db
+#.DS_Store
+
+# --- Wildcards ---
+#*.tmp
+#*secret*
+#temp_*.md
+#*backup*

@@ -1,7 +1,8 @@
 import os
+import re
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from dotenv import load_dotenv
 
 # Load environment variables from .env file in second-brain-mcp directory
@@ -44,6 +45,9 @@ class Config:
     IGNORED_PATHS: List[str] = []
     IGNORED_FILES: List[str] = []
     _blacklist_mtime: Optional[float] = None
+    # Unified pattern storage: list of (raw_pattern, pattern_type, compiled_regex)
+    # Types: "folder", "file", "glob", "abs_folder", "abs_file"
+    _blacklist_patterns: List[Tuple[str, str, "re.Pattern"]] = []
 
     # Obsidian Configuration
     OBSIDIAN_VAULT_PATH = os.getenv("OBSIDIAN_VAULT_PATH", "./SecondBrain")
@@ -189,67 +193,79 @@ class Config:
 
     @classmethod
     def _initialize_blacklists(cls):
-        """Initialize IGNORED_PATHS and IGNORED_FILES from multiple sources"""
-        from pathlib import Path
+        """Initialize blacklist patterns from .blacklist file and environment variables.
 
+        Classification rules:
+        - Ends with \\ or /                        → folder (explicit directory marker)
+        - Contains *                               → glob pattern
+        - Starts with X:\\ or \\\\                 → absolute path
+        - Starts with .\\ or ..\\ (relative path)  → folder after stripping prefix
+        - Contains / or \\ (has path separator)    → folder if no file extension, else file
+        - Ends with .extension (e.g., .md)         → file
+        - Bare name (no dots, slashes, wildcards)  → folder in vault root
+
+        File extension: a dot followed by 2-10 word chars at end of string,
+        but NOT a leading dot (which indicates a dot-folder like .obsidian).
+        """
         # Load from .blacklist file
         blacklist_items = cls._load_blacklist()
 
-        # Separate into paths and files based on content
-        # Paths: Don't contain . or end with /
-        # Files: Contain . and don't contain /
+        # Also parse environment variables
+        env_paths_str = os.getenv("IGNORED_PATHS", "")
+        env_files_str = os.getenv("IGNORED_FILES", "")
+        if env_paths_str:
+            blacklist_items.extend(cls._parse_list_var(env_paths_str))
+        if env_files_str:
+            blacklist_items.extend(cls._parse_list_var(env_files_str))
+
+        # Classify each item
         ignored_paths = []
         ignored_files = []
+        patterns = []
 
         for item in blacklist_items:
-            # Skip comments and empty lines (already handled in _load_blacklist)
             if not item or item.startswith("#"):
                 continue
 
-            item_stripped = item.strip()
+            raw = item.strip()
+            normalized = raw.replace("\\", "/")
 
-            # Normalize backslashes to forward slashes for consistent handling
-            normalized = item_stripped.replace("\\", "/")
+            ptype = cls._classify_pattern(normalized)
 
-            # Classify as path or file:
-            # - Ends with /          → path (explicit directory marker)
-            # - Starts with ./ or ../ → path (relative directory reference)
-            # - Contains /           → path (has directory component)
-            # - No dot               → path (bare folder name like "copilot")
-            # - Otherwise             → file (has dot but no path indicators)
-            is_path = (
-                normalized.endswith("/")
-                or normalized.startswith("./")
-                or normalized.startswith("../")
-                or "/" in normalized
-                or "." not in normalized
-            )
+            # Normalize relative path prefixes for clean matching
+            # (paths in the vault are relative without ./ prefix)
+            match_path = normalized
+            if match_path.startswith("./"):
+                match_path = match_path[2:]
+            elif match_path.startswith("../"):
+                match_path = match_path[3:]
 
-            if is_path:
-                # Strip leading ./ for clean pattern matching
-                # (watcher.py compares rel_path which has no ./ prefix)
-                clean = normalized
-                if clean.startswith("./"):
-                    clean = clean[2:]
-                ignored_paths.append(clean.rstrip("/"))
-            else:
-                ignored_files.append(item_stripped)
+            compiled = cls._compile_pattern(match_path, ptype)
 
-        # Also parse environment variables for backward compatibility
-        env_paths_str = os.getenv("IGNORED_PATHS", "")
-        env_files_str = os.getenv("IGNORED_FILES", "")
+            if compiled is None:
+                print(
+                    f"[CONFIG] Skipping invalid blacklist pattern: {raw}",
+                    file=sys.stderr,
+                )
+                continue
 
-        if env_paths_str:
-            env_paths = cls._parse_list_var(env_paths_str)
-            ignored_paths.extend(env_paths)
+            patterns.append((raw, ptype, compiled))
 
-        if env_files_str:
-            env_files = cls._parse_list_var(env_files_str)
-            ignored_files.extend(env_files)
+            # Maintain legacy lists for backward compatibility
+            if ptype in ("folder", "abs_folder"):
+                ignored_paths.append(match_path.rstrip("/"))
+            elif ptype == "file":
+                ignored_files.append(raw)
+            elif ptype == "glob":
+                # Glob patterns affect both paths and files
+                ignored_paths.append(match_path)
+                ignored_files.append(raw)
+            elif ptype == "abs_file":
+                ignored_files.append(raw)
 
-        # Remove duplicates and sort, then assign to class variables
         cls.IGNORED_PATHS = sorted(list(set(ignored_paths)))
         cls.IGNORED_FILES = sorted(list(set(ignored_files)))
+        cls._blacklist_patterns = patterns
 
         # Store current mtime for change detection
         if cls.BLACKLIST_FILE_PATH.exists():
@@ -259,12 +275,129 @@ class Config:
 
         if Config.DEBUG:
             print(
-                f"[CONFIG] Initialized blacklists: {len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files",
+                f"[CONFIG] Initialized blacklists: {len(patterns)} patterns "
+                f"({len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files)",
                 file=sys.stderr,
             )
             if hasattr(Config, "DEBUG_VERBOSE") and Config.DEBUG_VERBOSE:
-                print(f"[CONFIG] IGNORED_PATHS: {cls.IGNORED_PATHS}", file=sys.stderr)
-                print(f"[CONFIG] IGNORED_FILES: {cls.IGNORED_FILES}", file=sys.stderr)
+                for raw, ptype, _ in patterns:
+                    print(f"[CONFIG]   [{ptype}] {raw}", file=sys.stderr)
+
+    @classmethod
+    def _classify_pattern(cls, normalized: str) -> str:
+        """Classify a normalized (forward-slash) blacklist pattern.
+
+        Returns one of: folder, file, glob, abs_folder, abs_file
+        """
+        # Ends with / → folder
+        if normalized.endswith("/"):
+            return "folder"
+
+        # Contains * → glob
+        if "*" in normalized:
+            return "glob"
+
+        # Starts with X:/ or // → absolute path (Windows drive or UNC)
+        is_absolute = (
+            len(normalized) >= 3
+            and normalized[1] == ":"
+            and normalized[2] == "/"
+        ) or normalized.startswith("//")
+
+        if is_absolute:
+            # Check if it looks like a file (has extension at end)
+            if cls._has_file_extension(normalized):
+                return "abs_file"
+            return "abs_folder"
+
+        # Relative path with ./ or ../ prefix → strip prefix, classify remainder
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        elif normalized.startswith("../"):
+            normalized = normalized[3:]
+
+        # Contains / → has directory component
+        has_separator = "/" in normalized
+
+        # Check for file extension
+        has_extension = cls._has_file_extension(normalized)
+
+        if has_extension:
+            return "file"
+        elif has_separator:
+            return "folder"
+        else:
+            # Bare name like "copilot" or ".obsidian" → folder in vault root
+            return "folder"
+
+    @classmethod
+    def _has_file_extension(cls, path: str) -> bool:
+        """Check if path ends with a file extension (. followed by 2-10 word chars).
+
+        Returns False for dot-folders like .obsidian (leading dot, no second dot).
+        A file extension requires a dot that is NOT at position 0.
+        """
+        # Match .extension at end: dot followed by 2-10 alphanumeric/underscore chars
+        # The dot must NOT be at position 0 (that's a dot-folder)
+        match = re.search(r"\.(\w{2,10})$", path)
+        if match:
+            # Check if this dot is at position 0 (dot-folder like .obsidian)
+            dot_pos = match.start()
+            return dot_pos > 0
+        return False
+
+    @classmethod
+    def _compile_pattern(cls, normalized: str, ptype: str) -> Optional["re.Pattern"]:
+        """Compile a pattern into a regex for matching.
+
+        For glob patterns: * matches any characters including /
+        For folder patterns: matches path prefix, nested component, or exact
+        For file patterns: matches filename
+        """
+        try:
+            if ptype == "glob":
+                # Convert glob to regex: * → .* (matches anything including /)
+                # Escape all regex special chars except *
+                escaped = re.escape(normalized)
+                # re.escape turns * into \*, so we need to unescape those
+                escaped = escaped.replace(r"\*", ".*")
+                # Glob patterns match anywhere in the path
+                # Add leading .* unless pattern already starts with .*
+                if not escaped.startswith(".*"):
+                    escaped = ".*" + escaped
+                # If glob contains path separators, it describes a directory path
+                # and should also match any contents beneath it
+                if "/" in normalized:
+                    escaped += "(/.*)?"
+                return re.compile("^" + escaped + "$", re.IGNORECASE)
+
+            elif ptype in ("folder", "abs_folder"):
+                # Folder patterns match as:
+                # 1. Path starts with folder/
+                # 2. Path equals folder exactly
+                # 3. Path contains /folder/ as a complete directory segment
+                clean = normalized.rstrip("/")
+                escaped = re.escape(clean)
+                # Match: ^folder/ or /folder/ or ^folder$ or ^folder$ (at root)
+                pattern_str = (
+                    f"^({escaped}/|{escaped}$|.*/{escaped}/|/{escaped}$)"
+                )
+                return re.compile(pattern_str, re.IGNORECASE)
+
+            elif ptype in ("file", "abs_file"):
+                # File patterns match the filename component
+                filename = Path(normalized).name
+                escaped = re.escape(filename)
+                # Match filename exactly or as prefix (for partial name matching)
+                return re.compile(f"^({escaped}|{re.escape(Path(normalized).stem)})", re.IGNORECASE)
+
+            return None
+        except re.error as e:
+            print(
+                f"[CONFIG] Invalid regex in pattern '{normalized}': {e}",
+                file=sys.stderr,
+            )
+            return None
 
     @classmethod
     def reload_blacklist_if_changed(cls) -> bool:
@@ -293,6 +426,41 @@ class Config:
             return True
 
         return False
+
+    @classmethod
+    def is_blacklisted(cls, rel_path: str, abs_path: str = "") -> str:
+        """Check if a path should be excluded based on blacklist patterns.
+
+        Args:
+            rel_path: Relative path from vault root (e.g., "copilot/note.md")
+            abs_path: Absolute path (optional, used for absolute pattern matching)
+
+        Returns: The matching blacklist pattern string if excluded, empty string otherwise.
+        """
+        rel_normalized = rel_path.replace("\\", "/")
+
+        for raw, ptype, compiled in cls._blacklist_patterns:
+            if ptype in ("folder", "file", "glob"):
+                # Match against relative path
+                if compiled.search(rel_normalized):
+                    return raw
+                # For file patterns, also check just the filename
+                if ptype == "file":
+                    filename = Path(rel_normalized).name
+                    if compiled.search(filename):
+                        return raw
+            elif ptype in ("abs_folder", "abs_file"):
+                # Match against absolute path
+                if abs_path:
+                    abs_normalized = abs_path.replace("\\", "/")
+                    if compiled.search(abs_normalized):
+                        return raw
+                    if ptype == "abs_file":
+                        filename = Path(abs_normalized).name
+                        if compiled.search(filename):
+                            return raw
+
+        return ""
 
     print("[OK] All configuration validated successfully", file=sys.stderr)
 

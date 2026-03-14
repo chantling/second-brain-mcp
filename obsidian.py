@@ -1226,16 +1226,19 @@ class ObsidianManager:
 
             for md_file in markdown_files:
                 try:
+                    rel_path = str(md_file.relative_to(self.vault_path))
+
+                    # Skip blacklisted paths and files
+                    if Config.is_blacklisted(rel_path, str(md_file)):
+                        continue
+
                     content = md_file.read_text(encoding="utf-8")
-                    metadata = self._extract_frontmatter(
-                        content, str(md_file.relative_to(self.vault_path))
-                    )
+                    metadata = self._extract_frontmatter(content, rel_path)
                     supabase_id = metadata.get("supabase_id")
                     if supabase_id:
-                        rel_path = str(md_file.relative_to(self.vault_path))
                         supabase_id_to_path[supabase_id] = rel_path
                         path_to_supabase_id[rel_path] = supabase_id
-                except Exception as e:
+                except Exception:
                     # Skip files that can't be read
                     pass
 
@@ -1361,11 +1364,8 @@ class ObsidianManager:
             try:
                 rel_path = str(md_file.relative_to(self.vault_path))
 
-                # Skip special files
-                if any(
-                    skip in rel_path
-                    for skip in [".obsidian", "!Folder_Embeddings.md", ".trash"]
-                ):
+                # Skip blacklisted paths and files
+                if Config.is_blacklisted(rel_path, str(md_file)):
                     skipped_count += 1
                     continue
 
@@ -1506,7 +1506,9 @@ class ObsidianManager:
             file=sys.stderr,
         )
 
-        return {"created": synced_count, "ids": created_ids}
+        result = {"created": synced_count, "ids": created_ids}
+        self._last_sync_result = result
+        return result
 
     def get_last_sync_result(self):
         """Get the result from the last sync operation
@@ -1543,11 +1545,8 @@ class ObsidianManager:
             try:
                 rel_path = str(md_file.relative_to(self.vault_path))
 
-                # Skip special files
-                if any(
-                    skip in rel_path
-                    for skip in [".obsidian", "!Folder_Embeddings.md", ".trash"]
-                ):
+                # Skip blacklisted paths and files
+                if Config.is_blacklisted(rel_path, str(md_file)):
                     skipped_count += 1
                     continue
 
