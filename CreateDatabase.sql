@@ -12,10 +12,11 @@
 -- Order of Execution:
 --   1. Enable required extensions
 --   2. Create base tables (with all columns)
---   3. Create indexes
---   4. Create RPC functions
---   5. Create triggers
---   6. Add comments
+--   3. Enable Row Level Security (RLS)
+--   4. Create indexes
+--   5. Create RPC functions
+--   6. Create triggers
+--   7. Add comments
 --
 -- Prerequisites:
 --   - Supabase project with PostgreSQL 14+
@@ -138,12 +139,24 @@ CREATE TABLE IF NOT EXISTS links (
     UNIQUE(source_thought_id, target_thought_id, link_type)
 );
 
+-- ----------------------------------------------------------------------------
+-- 2.6. Row Level Security (RLS)
+-- ----------------------------------------------------------------------------
+-- Enable RLS on all tables. service_role key bypasses RLS (used by MCP server).
+-- anon key gets zero access by default (no policies defined for it).
+
+ALTER TABLE public.thoughts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tags ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.thought_tags ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.folders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.links ENABLE ROW LEVEL SECURITY;
+
 -- ============================================================================
--- 3. INDEXES
+-- 4. INDEXES
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 3.1. thoughts Table Indexes
+-- 4.1. thoughts Table Indexes
 -- ----------------------------------------------------------------------------
 
 -- Vector similarity index (IVFFlat for pgvector)
@@ -177,14 +190,14 @@ CREATE INDEX IF NOT EXISTS idx_thoughts_content_tsv ON thoughts USING gin(conten
 CREATE INDEX IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin(content gin_trgm_ops);
 
 -- ----------------------------------------------------------------------------
--- 3.2. tags Table Indexes
+-- 4.2. tags Table Indexes
 -- ----------------------------------------------------------------------------
 
 -- Unique index on tag name (already enforced by UNIQUE constraint, but indexed for lookups)
 CREATE INDEX IF NOT EXISTS tags_name_idx ON tags(name);
 
 -- ----------------------------------------------------------------------------
--- 3.3. thought_tags Table Indexes
+-- 4.3. thought_tags Table Indexes
 -- ----------------------------------------------------------------------------
 
 -- Tag lookups (find thoughts by tag)
@@ -194,7 +207,7 @@ CREATE INDEX IF NOT EXISTS thought_tags_tag_id_idx ON thought_tags(tag_id);
 CREATE INDEX IF NOT EXISTS thought_tags_thought_id_idx ON thought_tags(thought_id);
 
 -- ----------------------------------------------------------------------------
--- 3.4. folders Table Indexes
+-- 4.4. folders Table Indexes
 -- ----------------------------------------------------------------------------
 
 -- Path lookup (for folder matching)
@@ -206,7 +219,7 @@ USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 50);
 
 -- ----------------------------------------------------------------------------
--- 3.5. links Table Indexes
+-- 4.5. links Table Indexes
 -- ----------------------------------------------------------------------------
 
 -- Backlink lookups (find notes linking TO this note)
@@ -216,11 +229,11 @@ CREATE INDEX IF NOT EXISTS links_target_thought_id_idx ON links(target_thought_i
 CREATE INDEX IF NOT EXISTS links_source_thought_id_idx ON links(source_thought_id);
 
 -- ============================================================================
--- 4. RPC FUNCTIONS
+-- 5. RPC FUNCTIONS
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 4.1. vector_search Function
+-- 5.1. vector_search Function
 -- ----------------------------------------------------------------------------
 -- Performs semantic similarity search using vector embeddings
 -- Returns thoughts ordered by similarity (most similar first)
@@ -274,7 +287,7 @@ END;
 $$;
 
 -- ----------------------------------------------------------------------------
--- 4.2. execute_sql Function
+-- 5.2. execute_sql Function
 -- ----------------------------------------------------------------------------
 -- Executes raw SQL statements for complex queries
 -- SECURITY WARNING: This function executes arbitrary SQL. Use with caution.
@@ -292,7 +305,7 @@ END;
 $$;
 
 -- ----------------------------------------------------------------------------
--- 4.3. search_thoughts_by_text Function
+-- 5.3. search_thoughts_by_text Function
 -- ----------------------------------------------------------------------------
 -- Full-text search with ranking using PostgreSQL tsvector
 -- Returns thoughts ordered by relevance and recency
@@ -331,7 +344,7 @@ END;
 $$;
 
 -- ----------------------------------------------------------------------------
--- 4.4. update_tag_embedding Function
+-- 5.4. update_tag_embedding Function
 -- ----------------------------------------------------------------------------
 -- Placeholder function for updating tag embeddings (optional)
 -- This would generate embeddings for tags using an external service
@@ -349,11 +362,11 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- 5. TRIGGERS
+-- 6. TRIGGERS
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 5.1. thoughts_content_tsv_trigger
+-- 6.1. thoughts_content_tsv_trigger
 -- ----------------------------------------------------------------------------
 -- Automatically updates the content_tsv column when content is inserted or updated
 -- Converts text to tsvector format for full-text search
@@ -372,7 +385,7 @@ BEFORE INSERT OR UPDATE OF content ON thoughts
 FOR EACH ROW EXECUTE FUNCTION thoughts_content_tsv_trigger();
 
 -- ----------------------------------------------------------------------------
--- 5.2. update_updated_at Trigger
+-- 6.2. update_updated_at Trigger
 -- ----------------------------------------------------------------------------
 -- Automatically updates the updated_at timestamp when any row is modified
 
@@ -397,7 +410,7 @@ BEFORE UPDATE ON folders
 FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================================================
--- 6. COMMENTS
+-- 7. COMMENTS
 -- ============================================================================
 
 -- Document the purpose of key columns and triggers
@@ -415,7 +428,7 @@ COMMENT ON TABLE links IS 'Wiki-link relationships between thoughts for backlink
 COMMENT ON TABLE thought_tags IS 'Many-to-many relationship between thoughts and tags';
 
 -- ============================================================================
--- 7. VERIFICATION
+-- 8. VERIFICATION
 -- ============================================================================
 
 -- Check all tables exist

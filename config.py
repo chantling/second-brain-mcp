@@ -205,20 +205,34 @@ class Config:
             if not item or item.startswith("#"):
                 continue
 
-            # Check if it's a path or file
-            # Heuristic: If it ends with / or doesn't contain ., it's a path
-            # If it contains . and doesn't have /, it's a file
             item_stripped = item.strip()
 
-            if item_stripped.endswith("/") or "." not in item_stripped:
-                ignored_paths.append(item_stripped.rstrip("/"))
+            # Normalize backslashes to forward slashes for consistent handling
+            normalized = item_stripped.replace("\\", "/")
+
+            # Classify as path or file:
+            # - Ends with /          → path (explicit directory marker)
+            # - Starts with ./ or ../ → path (relative directory reference)
+            # - Contains /           → path (has directory component)
+            # - No dot               → path (bare folder name like "copilot")
+            # - Otherwise             → file (has dot but no path indicators)
+            is_path = (
+                normalized.endswith("/")
+                or normalized.startswith("./")
+                or normalized.startswith("../")
+                or "/" in normalized
+                or "." not in normalized
+            )
+
+            if is_path:
+                # Strip leading ./ for clean pattern matching
+                # (watcher.py compares rel_path which has no ./ prefix)
+                clean = normalized
+                if clean.startswith("./"):
+                    clean = clean[2:]
+                ignored_paths.append(clean.rstrip("/"))
             else:
-                # Extract just filename if path provided
-                if "/" in item_stripped:
-                    filename = Path(item_stripped).name
-                    ignored_files.append(filename)
-                else:
-                    ignored_files.append(item_stripped)
+                ignored_files.append(item_stripped)
 
         # Also parse environment variables for backward compatibility
         env_paths_str = os.getenv("IGNORED_PATHS", "")
