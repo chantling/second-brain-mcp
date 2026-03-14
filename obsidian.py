@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from config import Config
 from database import transform_metadata_for_database
+from tag_utils import sync_tags_for_thought
 
 # Debug flag - use Config.DEBUG
 DEBUG = Config.DEBUG
@@ -1471,6 +1472,11 @@ class ObsidianManager:
                             f"[SYNC] Stored with supabase_id={supabase_id}",
                             file=sys.stderr,
                         )
+
+                    # Sync tags to thought_tags table
+                    await sync_tags_for_thought(
+                        self.db_manager, supabase_id, content, metadata.get("topics")
+                    )
 
                     # Update frontmatter with supabase_id
                     self._update_frontmatter(md_file, supabase_id)

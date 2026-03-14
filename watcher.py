@@ -15,6 +15,7 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 from config import Config
+from tag_utils import sync_tags_for_thought
 
 # Module-level observer reference for health monitoring
 _observer_instance: Optional["PollingObserver"] = None
@@ -1409,6 +1410,11 @@ class ObsidianEventHandler(FileSystemEventHandler):
                     f"[CREATE] ✓✓✓ NEW ENTRY CREATED ✓✓✓ ID={supabase_id} for {obsidian_path}",
                     "CREATE",
                 )
+
+                # Sync tags to thought_tags table
+                await sync_tags_for_thought(
+                    db_manager, supabase_id, content, metadata.get("topics")
+                )
             except Exception as store_err:
                 _log(f"[CREATE] ✗ store_thought EXCEPTION: {str(store_err)}", "CREATE")
                 import traceback
@@ -1676,6 +1682,12 @@ class ObsidianEventHandler(FileSystemEventHandler):
             await db_manager.update_thought(
                 existing["id"], content, embedding, file_hash, metadata
             )
+
+            # Sync tags to thought_tags table
+            await sync_tags_for_thought(
+                db_manager, existing["id"], content, metadata.get("topics")
+            )
+
             _log(f"[DEBUG] _handle_modify 06", "MODIFY")
             print(f"[SYNC] Modified: {obsidian_path}", file=sys.stderr)
 

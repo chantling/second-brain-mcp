@@ -9,6 +9,7 @@ from database import DatabaseManager, transform_metadata_for_database
 from obsidian import ObsidianManager
 from embeddings import EmbeddingGenerator
 from metadata import MetadataExtractor
+from tag_utils import sync_tags_for_thought
 
 # Debug flag - set to True to enable debug output
 DEBUG = False
@@ -521,6 +522,11 @@ class ToolHandlers:
         # Store in Supabase
         supabase_id = await db_manager.store_thought(content, embedding, transformed_metadata)
 
+        # Sync tags to thought_tags table
+        await sync_tags_for_thought(
+            db_manager, supabase_id, content, metadata.get("topics")
+        )
+
         if DEBUG:
             print(f"[DEBUG] _store_new_thought - Stored in Supabase with ID: {supabase_id}", file=sys.stderr)
 
@@ -583,6 +589,11 @@ class ToolHandlers:
             # Update existing thought in place
             supabase_id = await db_manager.update_thought_content(
                 existing["id"], content, embedding, metadata
+            )
+
+            # Sync tags to thought_tags table
+            await sync_tags_for_thought(
+                db_manager, existing["id"], content, metadata.get("topics")
             )
 
             # Update Obsidian file
