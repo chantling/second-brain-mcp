@@ -885,14 +885,14 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
         Returns: True if blacklisted
         """
-        # Convert to consistent path format (forward slashes for matching)
-        rel_normalized = rel_path.replace("\\", "/")
-        abs_normalized = abs_path.replace("\\", "/")
-        pattern_normalized = pattern.replace("\\", "/")
+        # Convert to consistent path format (forward slashes, lowercase for case-insensitive matching)
+        rel_normalized = rel_path.replace("\\", "/").lower()
+        abs_normalized = abs_path.replace("\\", "/").lower()
+        pattern_normalized = pattern.replace("\\", "/").lower()
 
         # Exact filename match (for files like Untitled.md)
-        filename = Path(abs_path).name
-        if filename == pattern or filename == Path(pattern).name:
+        filename = Path(abs_path).name.lower()
+        if filename == pattern_normalized or filename == Path(pattern_normalized).name:
             return True
 
         # Relative path prefix match (e.g., copilot matches copilot/custom-prompts/file.md)
@@ -2097,6 +2097,18 @@ async def _cleanup_timer_loop():
             print(f"[ERROR] Cleanup timer failed: {e}", file=sys.stderr)
 
 
+async def _blacklist_watch_loop():
+    """Check if .blacklist file has been modified every 30 seconds"""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            Config.reload_blacklist_if_changed()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[ERROR] Blacklist watch failed: {e}", file=sys.stderr)
+
+
 def _verify_emitter_health(observer) -> Tuple[str, str]:
     """Verify the health of the observer's emitter.
 
@@ -2199,6 +2211,9 @@ def start_file_watcher(
     # Start periodic cleanup timer (every 30 seconds)
     cleanup_task = event_loop.create_task(_cleanup_timer_loop())
 
+    # Start blacklist file watch timer (every 30 seconds)
+    blacklist_watch_task = event_loop.create_task(_blacklist_watch_loop())
+
     # Start observer heartbeat task to verify it's alive
     heartbeat_task = event_loop.create_task(_observer_heartbeat_loop(vault_path))
 
@@ -2260,6 +2275,7 @@ def start_file_watcher(
         move_processor_task,
         heartbeat_task,
         deferred_move_task,
+        blacklist_watch_task,
     )
 
 

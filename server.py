@@ -463,6 +463,7 @@ async def _sync_takeover(
             _move_processor_task,
             _heartbeat_task,
             _deferred_move_task,
+            _blacklist_watch_task,
         ) = start_file_watcher(
             vault_path,
             event_loop,
@@ -717,13 +718,14 @@ async def main():
         if is_primary["value"] and Config.SYNC_ENABLED:
             try:
                 vault_path = Path(Config.OBSIDIAN_VAULT_PATH)
-                # ✅ FIX #1: Handle new return value (5 values: observer, cleanup_task, move_processor_task, heartbeat_task, deferred_move_task)
+                # ✅ FIX #1: Handle new return value (6 values: observer, cleanup_task, move_processor_task, heartbeat_task, deferred_move_task, blacklist_watch_task)
                 (
                     _file_watcher_observer,
                     _cleanup_timer_task,
                     _move_processor_task,
                     _heartbeat_task,
                     _deferred_move_task,
+                    _blacklist_watch_task,
                 ) = start_file_watcher(
                     vault_path,
                     loop,

@@ -43,6 +43,7 @@ class Config:
         BLACKLIST_FILE_PATH = Path(__file__).parent / ".blacklist"
     IGNORED_PATHS: List[str] = []
     IGNORED_FILES: List[str] = []
+    _blacklist_mtime: Optional[float] = None
 
     # Obsidian Configuration
     OBSIDIAN_VAULT_PATH = os.getenv("OBSIDIAN_VAULT_PATH", "./SecondBrain")
@@ -250,6 +251,12 @@ class Config:
         cls.IGNORED_PATHS = sorted(list(set(ignored_paths)))
         cls.IGNORED_FILES = sorted(list(set(ignored_files)))
 
+        # Store current mtime for change detection
+        if cls.BLACKLIST_FILE_PATH.exists():
+            cls._blacklist_mtime = cls.BLACKLIST_FILE_PATH.stat().st_mtime
+        else:
+            cls._blacklist_mtime = None
+
         if Config.DEBUG:
             print(
                 f"[CONFIG] Initialized blacklists: {len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files",
@@ -258,6 +265,34 @@ class Config:
             if hasattr(Config, "DEBUG_VERBOSE") and Config.DEBUG_VERBOSE:
                 print(f"[CONFIG] IGNORED_PATHS: {cls.IGNORED_PATHS}", file=sys.stderr)
                 print(f"[CONFIG] IGNORED_FILES: {cls.IGNORED_FILES}", file=sys.stderr)
+
+    @classmethod
+    def reload_blacklist_if_changed(cls) -> bool:
+        """Check if .blacklist file has been modified and reload if so.
+
+        Returns True if blacklist was reloaded, False otherwise.
+        """
+        if not cls.BLACKLIST_FILE_PATH.exists():
+            return False
+
+        current_mtime = cls.BLACKLIST_FILE_PATH.stat().st_mtime
+
+        if cls._blacklist_mtime is None or current_mtime > cls._blacklist_mtime:
+            print(
+                f"[CONFIG] Blacklist file changed, reloading...",
+                file=sys.stderr,
+            )
+            cls._initialize_blacklists()
+            print(
+                f"[CONFIG] Blacklist reloaded: {len(cls.IGNORED_PATHS)} paths, {len(cls.IGNORED_FILES)} files",
+                file=sys.stderr,
+            )
+            if Config.DEBUG:
+                print(f"[CONFIG] IGNORED_PATHS: {cls.IGNORED_PATHS}", file=sys.stderr)
+                print(f"[CONFIG] IGNORED_FILES: {cls.IGNORED_FILES}", file=sys.stderr)
+            return True
+
+        return False
 
     print("[OK] All configuration validated successfully", file=sys.stderr)
 
