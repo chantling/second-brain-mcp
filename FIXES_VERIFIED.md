@@ -112,7 +112,7 @@ Starting Second Brain MCP Server...
 [WATCHER] Initialized with 2.0s debounce
 [LAZY] Event loop set (ref: <weakref at 0x000002992FE5FC90; to 'ProactorEventLoop' at 0x00000299185C30D0>)
 [WATCHER] Started move queue processor
-[WATCHER] File watcher started for: C:\Users\John\Documents\#Obisidian#\John
+[WATCHER] File watcher started for: C:\Users\John\Documents\#Obsidian#\John
 [SYNC] File watcher enabled
 [SYNC] Initial sync will run in background. Server accepting requests immediately.
 ```
