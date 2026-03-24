@@ -41,7 +41,7 @@ class ObsidianManager:
 
     def ensure_special_folders_exist(self):
         """Ensure special folders exist (To-Do, Contacts, Resources/Recipes, ToSort)"""
-        special_folders = ["-To-Do-", "Contacts", "Resources/Recipes", "-To-Sort-"]
+        special_folders = ["!To-Do!", "Contacts", "Resources/Recipes", "!To-Sort!"]
 
         for folder in special_folders:
             (self.vault_path / folder).mkdir(parents=True, exist_ok=True)
@@ -152,7 +152,7 @@ class ObsidianManager:
         if thought_type == "recipe":
             return ("Resources/Recipes", 1.0)
         if thought_type == "todo":
-            return ("-To-Do-", 1.0)
+            return ("!To-Do!", 1.0)
         if thought_type == "contact":
             return ("Contacts", 1.0)
 
@@ -174,7 +174,7 @@ class ObsidianManager:
         if confidence >= 0.7:
             return (best_match, confidence)
         else:
-            return ("-To-Sort-", confidence)
+            return ("!To-Sort!", confidence)
 
     def _find_exact_folder(self, topic: str) -> Optional[str]:
         """
@@ -205,7 +205,7 @@ class ObsidianManager:
 
         Returns: (folder_path, confidence_score)
         """
-        best_match = "-To-Sort-"
+        best_match = "!To-Sort!"
         best_confidence = 0.0
 
         content_lower = content.lower()
@@ -462,7 +462,7 @@ class ObsidianManager:
             }
 
         folders_data = []
-        skip_folders = ["-To-Do-", "Contacts", "-To-Sort-", ".obsidian", ".ClineData"]
+        skip_folders = ["!To-Do!", "Contacts", "!To-Sort!", ".obsidian", ".ClineData"]
 
         # Phase 1: Load local cache and scan folders
         folder_embeddings = {}

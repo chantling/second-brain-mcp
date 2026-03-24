@@ -499,10 +499,10 @@ class ToolHandlers:
                     file=sys.stderr,
                 )
         else:
-            # Default to -To-Sort- folder if semantic placement is disabled
-            metadata["folder"] = "-To-Sort-"
+            # Default to !To-Sort! folder if semantic placement is disabled
+            metadata["folder"] = "!To-Sort!"
             print(
-                "[INFO] Semantic folder placement disabled, using -To-Sort- folder",
+                "[INFO] Semantic folder placement disabled, using !To-Sort! folder",
                 file=sys.stderr,
             )
 
