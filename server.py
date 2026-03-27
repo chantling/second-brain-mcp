@@ -316,6 +316,15 @@ async def _periodic_orphan_cleanup_loop(interval: int):
             )
 
 
+async def _run_warmup_background():
+    """Run embedding warmup in background (non-blocking)"""
+    try:
+        print("[INIT] Warmup running in background...", file=sys.stderr)
+        await tools.embedding_generator.warmup()
+    except Exception as e:
+        print(f"[WARNING] Background warmup failed: {e}", file=sys.stderr)
+
+
 async def _run_folder_sync_startup():
     """Run folder sync on server startup (non-blocking background task)"""
     try:
@@ -660,29 +669,9 @@ async def main():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-        # Warm up connections before accepting requests
-        print("[INIT] Warming up connections...", file=sys.stderr)
-        try:
-            # Warm up embedding generator
-            await tools.embedding_generator.warmup()
-        except Exception as e:
-            print(
-                f"[WARNING] Failed to warmup embedding generator: {e}", file=sys.stderr
-            )
-        # COMMENTED OUT: Database warmup may be redundant with connection pooling
-        # The Supabase client manages connection pooling automatically,
-        # and the first real query will establish a connection just as quickly.
-        # This also saves a database query on every server startup.
-        # try:
-        #     # Warm up database connection
-        #     await tools.db_manager.list_recent(days=365)
-        #     print("[INIT] Database connection warmup complete", file=sys.stderr)
-        # except Exception as e:
-        #     print(
-        #         f"[WARNING] Failed to warmup database connection: {e}", file=sys.stderr
-        #     )
+        # Server is ready immediately - warmup runs in background
         print(
-            "[INIT] Connection warmup complete, server ready to accept requests",
+            "[INIT] Server ready to accept requests (warmup in background)",
             file=sys.stderr,
         )
 
@@ -691,6 +680,10 @@ async def main():
         lock_manager = InstanceLock(Config)
         is_primary["value"] = False
         background_tasks = []
+
+        # Run warmup in background (non-blocking) - add after background_tasks init
+        warmup_task = loop.create_task(_run_warmup_background())
+        background_tasks.append(warmup_task)
 
         print(
             f"[LOCK] Lock file location: {lock_manager.lock_file_path}",
