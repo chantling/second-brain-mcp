@@ -1678,29 +1678,36 @@ class ObsidianManager:
                 )
                 frontmatter_dict = {}
 
-            # Update or add supabase_id
-            frontmatter_dict["supabase_id"] = supabase_id
+            # FIX: Check if supabase_id already exists - don't overwrite it!
+            # This prevents the bug where files were being reindexed with new IDs
+            # causing Obsidian Livesync conflicts
+            if "supabase_id" in frontmatter_dict:
+                # Already has supabase_id, don't modify
+                new_content = content
+            else:
+                # Add supabase_id and rebuild
+                frontmatter_dict["supabase_id"] = supabase_id
 
-            # Convert back to YAML string (preserving formatting)
-            try:
-                updated_frontmatter = yaml.dump(
-                    frontmatter_dict,
-                    default_flow_style=False,
-                    sort_keys=False,
-                    allow_unicode=True,
-                ).rstrip()
-            except yaml.YAMLError as e:
-                print(
-                    f"[WARNING] Failed to convert frontmatter to YAML: {e}",
-                    file=sys.stderr,
+                # Convert back to YAML string (preserving formatting)
+                try:
+                    updated_frontmatter = yaml.dump(
+                        frontmatter_dict,
+                        default_flow_style=False,
+                        sort_keys=False,
+                        allow_unicode=True,
+                    ).rstrip()
+                except yaml.YAMLError as e:
+                    print(
+                        f"[WARNING] Failed to convert frontmatter to YAML: {e}",
+                        file=sys.stderr,
+                    )
+                    return
+
+                # Rebuild complete content: opening --- + updated frontmatter + closing --- + rest of file
+                content_after_frontmatter = lines[frontmatter_end_idx + 1 :]
+                new_content = f"---\n{updated_frontmatter}\n---\n\n" + "\n".join(
+                    content_after_frontmatter
                 )
-                return
-
-            # Rebuild complete content: opening --- + updated frontmatter + closing --- + rest of file
-            content_after_frontmatter = lines[frontmatter_end_idx + 1 :]
-            new_content = f"---\n{updated_frontmatter}\n---\n\n" + "\n".join(
-                content_after_frontmatter
-            )
 
             file_path.write_text(new_content, encoding="utf-8")
         except Exception as e:
