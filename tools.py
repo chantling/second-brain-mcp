@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import hashlib
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from config import Config
@@ -10,6 +11,9 @@ from obsidian import ObsidianManager
 from embeddings import EmbeddingGenerator
 from metadata import MetadataExtractor
 from tag_utils import sync_tags_for_thought
+
+# Get logger for this module
+logger = logging.getLogger('second_brain.tools')
 
 # Debug flag - set to True to enable debug output
 DEBUG = False
@@ -54,9 +58,21 @@ class ToolHandlers:
 
         handler = handlers.get(name)
         if not handler:
+            logger.error(f"[TOOLS] Unknown tool requested: {name}")
             return {"error": f"Unknown tool: {name}"}
 
-        return await handler(**arguments)
+        logger.info(f"[TOOLS] Routing to handler: {name}")
+        start_time = datetime.now()
+        
+        try:
+            result = await handler(**arguments)
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"[TOOLS] Handler {name} completed in {elapsed:.2f}s")
+            return result
+        except Exception as e:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.error(f"[TOOLS] Handler {name} failed after {elapsed:.2f}s: {e}")
+            raise
 
     async def _sync_folders(self):
         """Sync Obsidian vault folders to database.
@@ -83,6 +99,9 @@ class ToolHandlers:
     ) -> Dict:
         """Store thought with duplicate detection"""
         debug_info = {} if DEBUG else None
+        store_start_time = datetime.now()
+        
+        logger.info(f"[STORE] store_thought started - content_length={len(content)}, title='{title[:50]}...' " if len(title) > 50 else f"[STORE] store_thought started - content_length={len(content)}, title='{title}'")
 
         try:
             # Debug: Capture initial parameters
@@ -100,10 +119,11 @@ class ToolHandlers:
 
             # Extract metadata if not provided
             if not metadata:
-                print(f"[DEBUG] store_thought - No metadata provided, extracting from content", file=sys.stderr)
+                logger.info("[STORE] No metadata provided, extracting from content...")
                 metadata = await metadata_extractor.extract_metadata(content, title)
+                logger.info(f"[STORE] Metadata extracted - type: {metadata.get('type', 'unknown')}, topics: {metadata.get('topics', [])}")
             else:
-                print(f"[DEBUG] store_thought - Using provided metadata with keys: {list(metadata.keys())}", file=sys.stderr)
+                logger.info(f"[STORE] Using provided metadata with keys: {list(metadata.keys())}")
 
             # CRITICAL FIX: Ensure title is in metadata
             # The AI might not return title, so we add it from the parameter
@@ -163,11 +183,18 @@ class ToolHandlers:
     ) -> List[Dict]:
         """Search thoughts by semantic similarity"""
         try:
-            # Generate query embedding
-            query_embedding = await embedding_generator.create_embedding(query)
+            # Generate query embedding with timeout
+            logger.info("[TOOLS] Creating query embedding...")
+            query_embedding = await asyncio.wait_for(
+                embedding_generator.create_embedding(query), timeout=15.0
+            )
+            logger.info("[TOOLS] Query embedding created, searching database...")
 
-            # Perform semantic search
-            results = await db_manager.semantic_search(query_embedding, limit)
+            # Perform semantic search with timeout
+            results = await asyncio.wait_for(
+                db_manager.semantic_search(query_embedding, limit), timeout=10.0
+            )
+            logger.info(f"[TOOLS] Database search completed, {len(results)} results")
 
             # Filter by topics if provided
             if topics:
@@ -186,7 +213,11 @@ class ToolHandlers:
 
             return results
 
+        except asyncio.TimeoutError as e:
+            logger.error(f"[TOOLS] semantic_search timed out: {e}")
+            return [{"error": "Search timed out", "message": "Search timed out"}]
         except Exception as e:
+            logger.error(f"[TOOLS] semantic_search failed: {e}")
             return [{"error": str(e), "message": "Search failed"}]
 
     async def list_recent(
@@ -485,22 +516,30 @@ class ToolHandlers:
         updates the database with the file path. Optionally adds duplicate warnings
         to the Obsidian note if duplicate information is provided.
         """
+        store_start_time = datetime.now()
+        logger.info(f"[STORE] _store_new_thought started - type: {metadata.get('type', 'unknown')}")
+        
         # Determine folder using semantic search if enabled and folders are synced
         global _folders_synced
         if Config.SEMANTIC_FOLDER_PLACEMENT and _folders_synced:
+            logger.info("[STORE] Running semantic folder search...")
             folder, confidence = await obsidian_manager._find_semantic_folder_match(
                 content, metadata
             )
             # Override folder in metadata if semantic search found a good match
             if confidence >= 0.6:
                 metadata["folder"] = folder
+                logger.info(f"[STORE] Semantic folder search selected: {folder} (confidence: {confidence:.2f})")
                 print(
                     f"[INFO] Semantic folder search selected: {folder} (confidence: {confidence:.2f})",
                     file=sys.stderr,
                 )
+            else:
+                logger.info(f"[STORE] Semantic folder search confidence too low ({confidence:.2f}), using default")
         else:
             # Default to !To-Sort! folder if semantic placement is disabled
             metadata["folder"] = "!To-Sort!"
+            logger.info("[STORE] Semantic folder placement disabled, using !To-Sort! folder")
             print(
                 "[INFO] Semantic folder placement disabled, using !To-Sort! folder",
                 file=sys.stderr,
@@ -510,6 +549,7 @@ class ToolHandlers:
         # This ensures that future modifications can be detected
         file_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         metadata["file_hash"] = file_hash
+        logger.info(f"[STORE] File hash computed: {file_hash[:16]}...")
 
         if DEBUG:
             print(f"[DEBUG] _store_new_thought - Metadata before database store: video_id={metadata.get('video_id')}, url={metadata.get('url')}", file=sys.stderr)
@@ -518,30 +558,46 @@ class ToolHandlers:
         # Transform metadata to database format
         # This handles: 'type' → 'thought_type', extra fields → metadata JSONB
         transformed_metadata = transform_metadata_for_database(metadata)
+        logger.info(f"[STORE] Metadata transformed - thought_type: {transformed_metadata.get('thought_type', 'unknown')}")
         
         # Store in Supabase
+        logger.info("[STORE] Storing in Supabase...")
+        supabase_start = datetime.now()
         supabase_id = await db_manager.store_thought(content, embedding, transformed_metadata)
+        supabase_elapsed = (datetime.now() - supabase_start).total_seconds()
+        logger.info(f"[STORE] Stored in Supabase with ID: {supabase_id} (took {supabase_elapsed:.2f}s)")
 
         # Sync tags to thought_tags table
+        logger.info("[STORE] Syncing tags...")
         await sync_tags_for_thought(
             db_manager, supabase_id, content, metadata.get("topics")
         )
+        logger.info("[STORE] Tags synced successfully")
 
         if DEBUG:
             print(f"[DEBUG] _store_new_thought - Stored in Supabase with ID: {supabase_id}", file=sys.stderr)
 
         # Store in Obsidian
+        logger.info("[STORE] Creating Obsidian note...")
+        obsidian_start = datetime.now()
         obsidian_result = obsidian_manager.create_note(
             content, {**metadata, "supabase_id": supabase_id, "source": source}
         )
+        obsidian_elapsed = (datetime.now() - obsidian_start).total_seconds()
 
         obsidian_path = obsidian_result["path"]
+        logger.info(f"[STORE] Created Obsidian note at: {obsidian_path} (took {obsidian_elapsed:.2f}s)")
         
         if DEBUG:
             print(f"[DEBUG] _store_new_thought - Created Obsidian note at: {obsidian_path}", file=sys.stderr)
         
         # CRITICAL FIX: Update database with obsidian_path so downstream logic can find it
+        logger.info("[STORE] Updating database with Obsidian path...")
         await db_manager.update_obsidian_path(supabase_id, obsidian_path)
+        logger.info("[STORE] Database updated with Obsidian path")
+
+        total_elapsed = (datetime.now() - store_start_time).total_seconds()
+        logger.info(f"[STORE] _store_new_thought completed successfully in {total_elapsed:.2f}s")
 
         result = {
             "success": True,

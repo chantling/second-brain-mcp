@@ -1,12 +1,16 @@
 import os
 import json
 import sys
+import logging
 from typing import Dict, List
 from datetime import datetime
 from config import Config
 
 # Debug flag - set to True to enable debug output
 DEBUG = False
+
+# Get logger for this module
+logger = logging.getLogger('second_brain.metadata')
 
 class MetadataExtractor:
     """Metadata extractor using flexible AI provider (any OpenAI-compatible API)"""
@@ -49,6 +53,8 @@ class MetadataExtractor:
         video_id = self._extract_video_id(content)
         url = self._extract_url(content)
         
+        logger.info(f"[METADATA] extract_metadata started - content_length={len(content)}, title='{title[:50]}...' " if len(title) > 50 else f"[METADATA] extract_metadata started - content_length={len(content)}, title='{title}'")
+        
         prompt = f"""
         Analyze this content and extract structured metadata:
         
@@ -71,6 +77,8 @@ class MetadataExtractor:
         
         try:
             # Use OpenAI SDK with z.ai endpoint
+            logger.info("[METADATA] Calling API for metadata extraction...")
+            api_start = datetime.now()
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -91,6 +99,8 @@ class MetadataExtractor:
                     }
                 }
             )
+            api_elapsed = (datetime.now() - api_start).total_seconds()
+            logger.info(f"[METADATA] API call completed in {api_elapsed:.2f}s")
             
             # Extract content from response
             metadata_text = response.choices[0].message.content.strip()
@@ -109,21 +119,27 @@ class MetadataExtractor:
                 metadata_text = '\n'.join(content_lines).strip()
             
             # Parse JSON response
+            logger.info("[METADATA] Parsing JSON response from API...")
             metadata = json.loads(metadata_text)
+            logger.info(f"[METADATA] Parsed metadata from AI - type: {metadata.get('type', 'unknown')}, topics: {metadata.get('topics', [])}")
+            
             if DEBUG:
                 print(f"[DEBUG] metadata.py - Parsed metadata from AI: {metadata}", file=sys.stderr)
             
             # Add additional processing
             metadata["title"] = title or self._generate_title(content)
             metadata["created_at"] = datetime.now().isoformat()
+            logger.info(f"[METADATA] Set title: '{metadata['title']}'")
             
             # IMPORTANT: Preserve video_id and url for duplicate detection
             if video_id:
                 metadata["video_id"] = video_id
+                logger.info(f"[METADATA] Added video_id: {video_id}")
                 if DEBUG:
                     print(f"[DEBUG] metadata.py - Added video_id: {video_id}", file=sys.stderr)
             if url:
                 metadata["url"] = url
+                logger.info(f"[METADATA] Added url: {url}")
                 if DEBUG:
                     print(f"[DEBUG] metadata.py - Added url: {url}", file=sys.stderr)
             
@@ -140,6 +156,8 @@ class MetadataExtractor:
                 print(f"[DEBUG] extract_metadata - Content length: {len(content)}", file=sys.stderr)
                 print(f"[DEBUG] extract_metadata - video_id extracted: {video_id}", file=sys.stderr)
                 print(f"[DEBUG] extract_metadata - url extracted: {url}", file=sys.stderr)
+            
+            logger.info(f"[METADATA] extract_metadata completed successfully - type: {metadata.get('type', 'unknown')}, topics: {len(metadata.get('topics', []))} topics")
             
             return metadata
             

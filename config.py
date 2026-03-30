@@ -104,6 +104,9 @@ class Config:
     # Debug Configuration
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     DEBUG_VERBOSE = os.getenv("DEBUG_VERBOSE", "false").lower() == "true"
+    
+    # File Logging Configuration
+    FILE_LOGGING = os.getenv("FILE_LOGGING", "false").lower() == "true"
 
     _validated = False
 

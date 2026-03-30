@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import logging
 from typing import Dict, List, Optional, Set
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,9 @@ from urllib.parse import urlparse, urlunparse
 from config import Config
 from supabase import create_client, Client
 from supabase.lib.client_options import ClientOptions
+
+# Get logger for this module
+logger = logging.getLogger('second_brain.database')
 
 
 # Helper function for debug logging
@@ -77,6 +81,7 @@ class DatabaseManager:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         log_msg = f"[{ts}] [DB:INSERT] ↓↓↓ STORE_THOUGHT called ↓↓↓ path={obsidian_path}, hash={file_hash[:8] if file_hash else 'NONE'}..., source={source}"
         debug_log_to_file(log_msg)
+        logger.info(f"[DB] store_thought started - path={obsidian_path}, hash={file_hash[:8] if file_hash else 'NONE'}..., source={source}")
 
         log_msg = f"[{ts}] [DB:INSERT] Inserting new entry: path={obsidian_path}, hash={file_hash[:8] if file_hash else 'NONE'}..., source={source}"
         debug_log_to_file(log_msg)
@@ -96,15 +101,21 @@ class DatabaseManager:
 
         # Insert into thoughts table
         try:
+            logger.info("[DB] Executing Supabase insert...")
+            db_start = datetime.now()
             response = self.client.table("thoughts").insert(thought_data).execute()
+            db_elapsed = (datetime.now() - db_start).total_seconds()
+            logger.info(f"[DB] Supabase insert completed in {db_elapsed:.2f}s")
         except Exception as insert_err:
             log_msg = f"[{ts}] [DB:INSERT] ✗ INSERT FAILED: {str(insert_err)}"
             debug_log_to_file(log_msg)
+            logger.error(f"[DB] Insert failed: {insert_err}")
             raise
 
         if not response.data:
             log_msg = f"[{ts}] [DB:INSERT] ✗ INSERT returned no data: {response}"
             debug_log_to_file(log_msg)
+            logger.error(f"[DB] Insert returned no data: {response}")
             raise Exception(f"Failed to store thought: {response}")
 
         created_id = response.data[0]["id"]
@@ -113,6 +124,7 @@ class DatabaseManager:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         log_msg = f"[{ts}] [DB:INSERT] ✓✓✓ SUCCESS ✓✓✓: New entry created with ID={created_id} for path={obsidian_path}"
         debug_log_to_file(log_msg)
+        logger.info(f"[DB] Successfully stored thought with ID={created_id}")
 
         return created_id
 

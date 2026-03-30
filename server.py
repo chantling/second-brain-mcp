@@ -12,6 +12,8 @@ from config import Config
 from tools import ToolHandlers
 from instance_lock import InstanceLock
 import portalocker
+import logging
+from datetime import datetime
 
 # Global file watcher reference
 _file_watcher_observer = None
@@ -29,6 +31,54 @@ def debug_log(msg: str):
     """Print debug message if DEBUG is enabled"""
     if Config.DEBUG:
         print(msg, file=sys.stderr)
+
+
+# Setup file logging with timestamps (toggleable via FILE_LOGGING config)
+def setup_logging():
+    """Setup file logging to Logs directory with timestamps
+    
+    Controlled by Config.FILE_LOGGING:
+    - True: Log to both file and stderr
+    - False: Log to stderr only (default behavior)
+    """
+    log_dir = Path("Logs")
+    
+    if Config.FILE_LOGGING:
+        # Create Logs directory if it doesn't exist
+        log_dir.mkdir(exist_ok=True)
+        
+        # Create log filename with current date
+        log_filename = log_dir / f"second_brain_{datetime.now().strftime('%Y-%m-%d')}.log"
+        
+        # Configure logging with file handler
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            handlers=[
+                logging.FileHandler(log_filename, encoding='utf-8'),
+                logging.StreamHandler(sys.stderr)
+            ],
+            force=True
+        )
+        
+        print(f"[LOGGING] File logging enabled: {log_filename}", file=sys.stderr)
+    else:
+        # Configure logging to stderr only
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            handlers=[logging.StreamHandler(sys.stderr)],
+            force=True
+        )
+        
+        print("[LOGGING] File logging disabled (set FILE_LOGGING=true to enable)", file=sys.stderr)
+    
+    return logging.getLogger('second_brain')
+
+# Initialize logger
+logger = setup_logging()
 
 
 # Create server instance
@@ -255,29 +305,31 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls"""
+    start_time = datetime.now()
+    logger.info(f"[TOOL] Starting tool call: {name}")
+
     try:
-        result = await tool_handlers.handle_tool_call(name, arguments)
+        # Wrap tool handler with overall timeout (45s to beat MCP Inspector's 60s)
+        result = await asyncio.wait_for(
+            tool_handlers.handle_tool_call(name, arguments),
+            timeout=45.0,
+        )
 
-        # Run orphan cleanup after each tool call
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"[TOOL] Completed tool call: {name} in {elapsed:.2f}s")
+
+        # Run orphan cleanup after each tool call (non-blocking, best effort)
         if Config.SYNC_ENABLED:
-            try:
-                from obsidian import ObsidianManager
-
-                obsidian_manager = ObsidianManager(
-                    Config.OBSIDIAN_VAULT_PATH, db_manager=tool_handlers.db_manager
-                )
-                sync_result = obsidian_manager.get_last_sync_result()
-                await obsidian_manager.remove_orphaned_supabase_entries(
-                    exclude_ids=sync_result.get("ids", []) if sync_result else []
-                )
-            except Exception as e:
-                print(
-                    f"[WARNING] Orphan cleanup after tool call failed: {e}",
-                    file=sys.stderr,
-                )
+            asyncio.ensure_future(_run_orphan_cleanup_after_tool_call())
 
         return [TextContent(type="text", text=str(result))]
+    except asyncio.TimeoutError:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.error(f"[TOOL] Tool call timed out: {name} after {elapsed:.2f}s")
+        return [TextContent(type="text", text=f"Error: Tool call '{name}' timed out")]
     except Exception as e:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.error(f"[TOOL] Tool call failed: {name} after {elapsed:.2f}s - {e}")
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
@@ -316,13 +368,37 @@ async def _periodic_orphan_cleanup_loop(interval: int):
             )
 
 
+async def _run_orphan_cleanup_after_tool_call():
+    """Run orphan cleanup after a tool call (non-blocking)"""
+    try:
+        from obsidian import ObsidianManager
+        import tools
+
+        obsidian_manager = ObsidianManager(
+            Config.OBSIDIAN_VAULT_PATH, db_manager=tools.db_manager
+        )
+        sync_result = obsidian_manager.get_last_sync_result()
+        await obsidian_manager.remove_orphaned_supabase_entries(
+            exclude_ids=sync_result.get("ids", []) if sync_result else []
+        )
+    except Exception as e:
+        logger.warning(f"Orphan cleanup after tool call failed: {e}")
+
+
 async def _run_warmup_background():
     """Run embedding warmup in background (non-blocking)"""
+    import tools
+
+    start_time = datetime.now()
+    logger.info("[WARMUP] Starting embedding warmup in background...")
+
     try:
-        print("[INIT] Warmup running in background...", file=sys.stderr)
         await tools.embedding_generator.warmup()
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"[WARMUP] Embedding warmup completed successfully in {elapsed:.2f}s")
     except Exception as e:
-        print(f"[WARNING] Background warmup failed: {e}", file=sys.stderr)
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.error(f"[WARMUP] Background warmup failed after {elapsed:.2f}s: {e}")
 
 
 async def _run_folder_sync_startup():
@@ -631,6 +707,10 @@ async def main():
     from watcher import start_file_watcher
     import tools
 
+    main_start_time = datetime.now()
+    logger.info(f"[MAIN] main() function started at {main_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+    print(f"[MAIN] main() function started at {main_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}", file=sys.stderr)
+
     # Flag to track shutdown request
     shutdown_requested = False
 
@@ -645,10 +725,9 @@ async def main():
         global _file_watcher_observer
         if not shutdown_requested:
             shutdown_requested = True
-            print(
-                f"\nReceived signal {signum}, shutting down gracefully...",
-                file=sys.stderr,
-            )
+            signal_msg = f"\nReceived signal {signum}, shutting down gracefully..."
+            print(signal_msg, file=sys.stderr)
+            logger.info(f"[MAIN] {signal_msg}")
             if _file_watcher_observer:
                 _file_watcher_observer.stop()
             # Cancel background tasks
@@ -664,26 +743,32 @@ async def main():
 
     try:
         # Get or create event loop
+        logger.info("[MAIN] Getting or creating event loop...")
         loop = asyncio.get_running_loop()
         if loop is None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            logger.info("[MAIN] Created new event loop")
+        else:
+            logger.info("[MAIN] Using existing event loop")
 
         # Server is ready immediately - warmup runs in background
-        print(
-            "[INIT] Server ready to accept requests (warmup in background)",
-            file=sys.stderr,
-        )
+        ready_msg = "[INIT] Server ready to accept requests (warmup in background)"
+        print(ready_msg, file=sys.stderr)
+        logger.info(ready_msg)
 
         # Initialize lock manager and try to acquire lock
         global _file_watcher_observer
+        logger.info("[MAIN] Initializing lock manager...")
         lock_manager = InstanceLock(Config)
         is_primary["value"] = False
         background_tasks = []
 
         # Run warmup in background (non-blocking) - add after background_tasks init
+        logger.info("[MAIN] Creating warmup background task...")
         warmup_task = loop.create_task(_run_warmup_background())
         background_tasks.append(warmup_task)
+        logger.info("[MAIN] Warmup task added to background tasks")
 
         print(
             f"[LOCK] Lock file location: {lock_manager.lock_file_path}",
@@ -858,11 +943,26 @@ async def shutdown():
 
 
 if __name__ == "__main__":
+    # Entry point - start timing and logging
+    entry_start_time = datetime.now()
+    print(f"[ENTRY] Server entry point reached at {entry_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}", file=sys.stderr)
+    logger.info(f"[ENTRY] Server entry point reached at {entry_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+    
     # Validate configuration before starting
     try:
+        print("[ENTRY] Validating configuration...", file=sys.stderr)
+        logger.info("[ENTRY] Validating configuration...")
         Config.validate()
+        
         print("Starting Second Brain MCP Server...", file=sys.stderr)
+        logger.info("[ENTRY] Configuration validated successfully, starting main()...")
+        
+        # Run the main server
         asyncio.run(main())
+        
     except Exception as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
+        elapsed = (datetime.now() - entry_start_time).total_seconds()
+        error_msg = f"[ENTRY] Configuration error after {elapsed:.2f}s: {e}"
+        print(error_msg, file=sys.stderr)
+        logger.error(error_msg)
         sys.exit(1)

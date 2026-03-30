@@ -1,49 +1,34 @@
 """
-Vector embedding generation using OpenAI-compatible API
+Vector embedding generation using OpenAI-compatible API (uses requests for reliability)
 """
 
 import asyncio
 import sys
+import logging
 from config import Config
+
+# Get logger for this module
+logger = logging.getLogger('second_brain.embeddings')
 
 
 class EmbeddingGenerator:
     """Generate vector embeddings using OpenAI-compatible API (flexible provider)"""
 
     def __init__(self):
-        """Initialize the embedding generator with OpenAI-compatible API client.
-        
-        Loads API key, base URL, model name, and embedding dimensions from
-        Config. Creates an OpenAI client instance for generating vector
-        embeddings from text content using the configured embedding model.
-        """
-        try:
-            from openai import OpenAI
-
-            self.client = OpenAI(
-                api_key=Config.EMBEDDING_API_KEY,
-                base_url=Config.EMBEDDING_BASE_URL,
-                timeout=240,
-                max_retries=3,
-            )
-            self.model = Config.EMBEDDING_MODEL
-            self.dimensions = Config.EMBEDDING_DIMENSIONS
-        except ImportError:
-            raise ImportError(
-                "OpenAI SDK is required for embeddings. "
-                "Install it with: pip install openai>=1.0"
-            )
+        """Initialize the embedding generator with API configuration."""
+        self.api_key = Config.EMBEDDING_API_KEY
+        self.base_url = Config.EMBEDDING_BASE_URL.rstrip("/")
+        self.model = Config.EMBEDDING_MODEL
+        self.dimensions = Config.EMBEDDING_DIMENSIONS
 
     async def warmup(self):
         """Warm up connection pool by making a test embedding"""
         try:
-            print("[EMBEDDINGS] Warming up connection pool...", file=sys.stderr)
+            logger.info("[EMBEDDINGS] Warming up connection pool...")
             await self.create_embedding("warmup")
-            print(
-                "[EMBEDDINGS] Connection pool warmed up successfully", file=sys.stderr
-            )
+            logger.info("[EMBEDDINGS] Connection pool warmed up successfully")
         except Exception as e:
-            print(f"[WARNING] Failed to warmup embeddings: {e}", file=sys.stderr)
+            logger.warning(f"Failed to warmup embeddings: {e}")
 
     async def create_embedding(self, text: str) -> list:
         """
@@ -62,20 +47,17 @@ class EmbeddingGenerator:
         # Truncate text if too long (most APIs have limits)
         max_tokens = 8192
         if len(text) > max_tokens:
+            logger.warning(f"[EMBEDDINGS] Text too long ({len(text)} chars), truncating to {max_tokens} chars")
             text = text[:max_tokens]
 
-        try:
-            # Run blocking call in thread pool to avoid blocking async event loop
-            def _create_sync_embedding():
-                kwargs = {"model": self.model, "input": text}
-                if self.dimensions > 0:
-                    kwargs["dimensions"] = self.dimensions
-                response = self.client.embeddings.create(**kwargs)
-                return response.data[0].embedding
+        logger.info(f"[EMBEDDINGS] Creating embedding for {len(text)} chars...")
 
-            embedding = await asyncio.to_thread(_create_sync_embedding)
+        try:
+            loop = asyncio.get_running_loop()
+            embedding = await loop.run_in_executor(None, self._sync_create_embedding, text)
 
             elapsed = time.time() - start_time
+            logger.info(f"[EMBEDDINGS] Created embedding for {len(text)} chars in {elapsed:.2f}s")
             print(
                 f"[EMBEDDINGS] Created embedding for {len(text)} chars in {elapsed:.2f}s",
                 file=sys.stderr,
@@ -84,11 +66,42 @@ class EmbeddingGenerator:
             return embedding
         except Exception as e:
             elapsed = time.time() - start_time
+            logger.error(f"[EMBEDDINGS] Failed to create embedding after {elapsed:.2f}s: {e}")
             print(
                 f"[ERROR] Failed to create embedding after {elapsed:.2f}s: {e}",
                 file=sys.stderr,
             )
             raise Exception(f"Failed to create embedding: {e}")
+
+    def _sync_create_embedding(self, text: str) -> list:
+        """Synchronous embedding creation using requests library"""
+        import requests
+        import json
+
+        url = f"{self.base_url}/embeddings"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "input": text,
+        }
+        if self.dimensions > 0:
+            payload["dimensions"] = self.dimensions
+
+        logger.debug(f"[EMBEDDINGS] Calling API with model={self.model}, dimensions={self.dimensions}")
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        return data["data"][0]["embedding"]
 
     async def batch_create_embeddings(self, texts: list) -> list:
         """
@@ -109,11 +122,8 @@ class EmbeddingGenerator:
     async def close(self):
         """
         Close the client connection
-        Note: OpenAI SDK handles connection pooling automatically
         """
-        if hasattr(self, "client"):
-            # OpenAI SDK handles connection cleanup
-            pass
+        pass
 
 
 class EmbeddingManager(EmbeddingGenerator):
