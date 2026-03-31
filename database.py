@@ -961,16 +961,14 @@ class DatabaseManager:
     async def fulltext_search(self, query: str, limit: int = 10) -> List[Dict]:
         """Search thoughts using PostgreSQL full-text search with tsvector"""
         try:
-            # Use PostgreSQL's @@ operator for full-text search
-            # This is much faster than ILIKE for large datasets
+            # Use text_search() which correctly maps to @@ operator
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.client.table("thoughts")
                     .select(
                         "id, content, thought_type, topics, obsidian_path, created_at"
                     )
-                    .filter("content_tsv", "fts", query)
-                    .order("created_at", desc=True)
+                    .text_search("content_tsv", query)
                     .limit(limit)
                     .execute
                 ),

@@ -22,6 +22,7 @@ _move_processor_task = None
 _heartbeat_task = None
 
 # Global sync status tracking
+_orphan_cleanup_enabled = False
 _initial_sync_complete = False
 _initial_sync_running = False
 
@@ -351,6 +352,9 @@ async def _periodic_orphan_cleanup_loop(interval: int):
     while True:
         try:
             await asyncio.sleep(interval)
+            # Skip if orphan cleanup is not yet enabled
+            if not _orphan_cleanup_enabled:
+                continue
             # Run orphan cleanup
             obsidian_manager = ObsidianManager(
                 Config.OBSIDIAN_VAULT_PATH, db_manager=tools.db_manager
@@ -369,8 +373,16 @@ async def _periodic_orphan_cleanup_loop(interval: int):
 
 
 async def _run_orphan_cleanup_after_tool_call():
-    """Run orphan cleanup after a tool call (non-blocking)"""
+    """Run orphan cleanup after a tool call (non-blocking).
+
+    Waits for initial sync to complete before running to prevent race condition
+    where orphan cleanup deletes entries that haven't been synced yet.
+    """
     try:
+        # Wait for orphan cleanup to be enabled (initial sync must complete first)
+        if not _orphan_cleanup_enabled:
+            return
+
         from obsidian import ObsidianManager
         import tools
 
@@ -418,19 +430,20 @@ async def _run_orphan_cleanup_startup():
         file=sys.stderr,
     )
     try:
-        # Wait for initial sync to complete (poll every 5 seconds, up to 10 minutes)
+        # Wait for orphan cleanup to be enabled (poll every 5 seconds, up to 10 minutes)
         max_wait_seconds = 600
         poll_interval = 5
         elapsed = 0
-        while not _initial_sync_complete and elapsed < max_wait_seconds:
+        while not _orphan_cleanup_enabled and elapsed < max_wait_seconds:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
-        if not _initial_sync_complete:
+        if not _orphan_cleanup_enabled:
             print(
-                f"[SYNC] Initial sync still running after {max_wait_seconds}s, proceeding with orphan cleanup anyway",
+                f"[SYNC] Orphan cleanup still disabled after {max_wait_seconds}s, skipping",
                 file=sys.stderr,
             )
+            return
 
         print("[SYNC] Running orphan cleanup on startup...", file=sys.stderr)
         from obsidian import ObsidianManager
@@ -672,7 +685,7 @@ async def _sync_takeover(
 
 async def _run_initial_sync():
     """Run initial sync as a background task"""
-    global _initial_sync_running, _initial_sync_complete
+    global _initial_sync_running, _initial_sync_complete, _orphan_cleanup_enabled
 
     try:
         _initial_sync_running = True
@@ -686,16 +699,13 @@ async def _run_initial_sync():
         )
         await obsidian_manager.sync_existing_notes_to_supabase()
 
-        # CRITICAL FIX: Clean up orphaned Supabase entries after initial sync
-        # This ensures the database is consistent (no entries without matching notes)
-        sync_result = obsidian_manager.get_last_sync_result()
-        debug_log("[SYNC] Cleaning up orphaned Supabase entries...")
-        await obsidian_manager.remove_orphaned_supabase_entries(
-            exclude_ids=sync_result.get("ids", []) if sync_result else []
-        )
-
         _initial_sync_complete = True
         debug_log("[SYNC] Initial sync complete. Server is fully operational.")
+
+        # Enable orphan cleanup ONLY after initial sync is fully complete
+        # This prevents orphan cleanup from racing with the sync
+        _orphan_cleanup_enabled = True
+        debug_log("[SYNC] Orphan cleanup enabled.")
     except Exception as e:
         print(f"[ERROR] Initial sync failed: {e}", file=sys.stderr)
     finally:

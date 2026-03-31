@@ -24,6 +24,9 @@ class ObsidianManager:
     Uses Luca Decimal system with intelligent folder detection and confidence scoring.
     """
 
+    # Module-level shared sync result so all ObsidianManager instances can access it
+    _last_sync_result: Optional[Dict] = None
+
     def __init__(self, vault_path: str, db_manager=None):
         """Initialize Obsidian vault manager with path and optional database manager.
 
@@ -37,7 +40,6 @@ class ObsidianManager:
         self.ensure_special_folders_exist()
         self.db_manager = db_manager
         self._folders_synced = False
-        self._last_sync_result = None
 
     def ensure_special_folders_exist(self):
         """Ensure special folders exist (To-Do, Contacts, Resources/Recipes, ToSort)"""
@@ -1439,67 +1441,57 @@ class ObsidianManager:
                 file_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
                 # Store in Supabase
-                if self.db_manager:
-                    if Config.DEBUG:
-                        print(f"[SYNC] db_manager is set: True", file=sys.stderr)
-                        print(
-                            f"[SYNC] Storing with obsidian_path={rel_path}",
-                            file=sys.stderr,
-                        )
-
-                    # Transform metadata to database format
-                    # This handles: 'type' → 'thought_type', extra fields → metadata JSONB
-                    transformed_metadata = transform_metadata_for_database(metadata)
-
-                    # Add required fields for sync operations
-                    store_metadata = {
-                        **transformed_metadata,
-                        "obsidian_path": rel_path,
-                        "file_hash": file_hash,
-                        "source": "obsidian_import",
-                    }
-                    if Config.DEBUG:
-                        print(
-                            f"[SYNC] store_metadata={store_metadata}", file=sys.stderr
-                        )
-                    supabase_id = await self.db_manager.store_thought(
-                        content,
-                        embedding,
-                        store_metadata,
-                    )
-                    if Config.DEBUG:
-                        print(
-                            f"[SYNC] Stored with supabase_id={supabase_id}",
-                            file=sys.stderr,
-                        )
-
-                    # Sync tags to thought_tags table
-                    await sync_tags_for_thought(
-                        self.db_manager, supabase_id, content, metadata.get("topics")
+                if Config.DEBUG:
+                    print(f"[SYNC] db_manager is set: True", file=sys.stderr)
+                    print(
+                        f"[SYNC] Storing with obsidian_path={rel_path}",
+                        file=sys.stderr,
                     )
 
-                    # Update frontmatter with supabase_id
-                    self._update_frontmatter(md_file, supabase_id)
-                else:
-                    if Config.DEBUG:
-                        print(
-                            f"[SYNC] db_manager is NOT set, skipping store",
-                            file=sys.stderr,
-                        )
+                # Transform metadata to database format
+                # This handles: 'type' → 'thought_type', extra fields → metadata JSONB
+                transformed_metadata = transform_metadata_for_database(metadata)
 
-                    # Verify path was set (should be in metadata above, but ensure it's in DB)
-                    await self.db_manager.update_obsidian_path(supabase_id, rel_path)
+                # Add required fields for sync operations
+                store_metadata = {
+                    **transformed_metadata,
+                    "obsidian_path": rel_path,
+                    "file_hash": file_hash,
+                    "source": "obsidian_import",
+                }
+                if Config.DEBUG:
+                    print(
+                        f"[SYNC] store_metadata={store_metadata}", file=sys.stderr
+                    )
+                supabase_id = await self.db_manager.store_thought(
+                    content,
+                    embedding,
+                    store_metadata,
+                )
+                if Config.DEBUG:
+                    print(
+                        f"[SYNC] Stored with supabase_id={supabase_id}",
+                        file=sys.stderr,
+                    )
 
-                    # Track created entry IDs for orphan cleanup exclusion
-                    created_ids.append(supabase_id)
+                # Sync tags to thought_tags table
+                await sync_tags_for_thought(
+                    self.db_manager, supabase_id, content, metadata.get("topics")
+                )
 
-                    synced_count += 1
+                # Update frontmatter with supabase_id
+                self._update_frontmatter(md_file, supabase_id)
 
-                    if synced_count % 10 == 0:
-                        print(
-                            f"[SYNC] Progress: {synced_count} synced, {skipped_count} skipped",
-                            file=sys.stderr,
-                        )
+                # Track created entry IDs for orphan cleanup exclusion
+                created_ids.append(supabase_id)
+
+                synced_count += 1
+
+                if synced_count % 10 == 0:
+                    print(
+                        f"[SYNC] Progress: {synced_count} synced, {skipped_count} skipped",
+                        file=sys.stderr,
+                    )
 
             except Exception as e:
                 error_count += 1
@@ -1513,7 +1505,7 @@ class ObsidianManager:
         )
 
         result = {"created": synced_count, "ids": created_ids}
-        self._last_sync_result = result
+        ObsidianManager._last_sync_result = result
         return result
 
     def get_last_sync_result(self):
@@ -1521,7 +1513,7 @@ class ObsidianManager:
 
         Returns: Dict with 'created' (count) and 'ids' (list of entry IDs)
         """
-        return self._last_sync_result
+        return ObsidianManager._last_sync_result
 
     async def sync_changed_notes_to_supabase(self):
         """Sync notes that have changed since last sync (hash-based comparison)
@@ -1678,36 +1670,32 @@ class ObsidianManager:
                 )
                 frontmatter_dict = {}
 
-            # FIX: Check if supabase_id already exists - don't overwrite it!
-            # This prevents the bug where files were being reindexed with new IDs
-            # causing Obsidian Livesync conflicts
-            if "supabase_id" in frontmatter_dict:
-                # Already has supabase_id, don't modify
-                new_content = content
-            else:
-                # Add supabase_id and rebuild
-                frontmatter_dict["supabase_id"] = supabase_id
+            # Always write the supabase_id to frontmatter.
+            # The caller (sync_existing_notes_to_supabase) skips files whose
+            # supabase_id already exists in the database. If we reach this point,
+            # a NEW entry was created and the file must be updated with the new ID.
+            frontmatter_dict["supabase_id"] = supabase_id
 
-                # Convert back to YAML string (preserving formatting)
-                try:
-                    updated_frontmatter = yaml.dump(
-                        frontmatter_dict,
-                        default_flow_style=False,
-                        sort_keys=False,
-                        allow_unicode=True,
-                    ).rstrip()
-                except yaml.YAMLError as e:
-                    print(
-                        f"[WARNING] Failed to convert frontmatter to YAML: {e}",
-                        file=sys.stderr,
-                    )
-                    return
-
-                # Rebuild complete content: opening --- + updated frontmatter + closing --- + rest of file
-                content_after_frontmatter = lines[frontmatter_end_idx + 1 :]
-                new_content = f"---\n{updated_frontmatter}\n---\n\n" + "\n".join(
-                    content_after_frontmatter
+            # Convert back to YAML string (preserving formatting)
+            try:
+                updated_frontmatter = yaml.dump(
+                    frontmatter_dict,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                ).rstrip()
+            except yaml.YAMLError as e:
+                print(
+                    f"[WARNING] Failed to convert frontmatter to YAML: {e}",
+                    file=sys.stderr,
                 )
+                return
+
+            # Rebuild complete content: opening --- + updated frontmatter + closing --- + rest of file
+            content_after_frontmatter = lines[frontmatter_end_idx + 1 :]
+            new_content = f"---\n{updated_frontmatter}\n---\n\n" + "\n".join(
+                content_after_frontmatter
+            )
 
             file_path.write_text(new_content, encoding="utf-8")
         except Exception as e:
