@@ -96,6 +96,11 @@ class Config:
     )
     LOCK_STALE_THRESHOLD_SECONDS = int(os.getenv("LOCK_STALE_THRESHOLD_SECONDS", "60"))
 
+    # Supabase Distributed Lock Configuration (cross-instance coordination)
+    LOCK_TTL_SECONDS = int(os.getenv("LOCK_TTL_SECONDS", "30"))
+    LOCK_HEARTBEAT_INTERVAL = int(os.getenv("LOCK_HEARTBEAT_INTERVAL", "10"))
+    LOCK_ORPHAN_CLEANUP_TTL = int(os.getenv("LOCK_ORPHAN_CLEANUP_TTL", "120"))
+
     # Duplicate Handling Configuration
     DUPLICATE_HANDLING_MODE = os.getenv("DUPLICATE_HANDLING_MODE", "prompt").lower()
     DUPLICATE_USE_TASKS = os.getenv("DUPLICATE_USE_TASKS", "false").lower() == "true"

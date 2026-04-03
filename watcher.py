@@ -29,6 +29,7 @@ class LazyImport:
     _obsidian_manager = None
     _embedding_generator = None
     _metadata_extractor = None
+    _supabase_lock = None
     _event_loop_ref: Optional[weakref.ref] = None
 
     @classmethod
@@ -77,6 +78,7 @@ class LazyImport:
         cls._obsidian_manager = None
         cls._embedding_generator = None
         cls._metadata_extractor = None
+        cls._supabase_lock = None
 
         if Config.DEBUG:
             print("[LAZY] Cleanup complete", file=sys.stderr)
@@ -87,6 +89,15 @@ class LazyImport:
             "DatabaseManager not set. Ensure start_file_watcher() was called with db_manager."
         )
         return cls._db_manager
+
+    @classmethod
+    def get_supabase_lock(cls):
+        """Get or create the SupabaseLock instance for cross-instance coordination."""
+        if cls._supabase_lock is None:
+            from supabase_lock import SupabaseLock
+
+            cls._supabase_lock = SupabaseLock(cls.get_db_manager().client)
+        return cls._supabase_lock
 
     @classmethod
     def get_obsidian_manager(cls):
@@ -1390,53 +1401,71 @@ class ObsidianEventHandler(FileSystemEventHandler):
             # Compute file hash
             file_hash = self._compute_hash(content)
 
-            # Store in Supabase
+            # Store in Supabase (with distributed lock for cross-instance coordination)
             _log(
-                f"[CREATE] Calling db_manager.store_thought() for {obsidian_path}",
+                f"[CREATE] Acquiring distributed lock for {obsidian_path}",
                 "CREATE",
             )
-            try:
-                supabase_id = await db_manager.store_thought(
-                    content,
-                    embedding,
-                    {
-                        **metadata,
-                        "obsidian_path": obsidian_path,
-                        "file_hash": file_hash,
-                        "source": "obsidian",
-                    },
-                )
+            lock = LazyImport.get_supabase_lock()
+            if not await lock.acquire("create", Config.LOCK_TTL_SECONDS):
                 _log(
-                    f"[CREATE] ✓✓✓ NEW ENTRY CREATED ✓✓✓ ID={supabase_id} for {obsidian_path}",
+                    f"[CREATE] Could not acquire lock, skipping: {obsidian_path}",
                     "CREATE",
                 )
+                return
 
-                # Sync tags to thought_tags table
-                await sync_tags_for_thought(
-                    db_manager, supabase_id, content, metadata.get("topics")
+            try:
+                await lock.start_auto_renew()
+
+                _log(
+                    f"[CREATE] Calling db_manager.store_thought() for {obsidian_path}",
+                    "CREATE",
                 )
-            except Exception as store_err:
-                _log(f"[CREATE] ✗ store_thought EXCEPTION: {str(store_err)}", "CREATE")
-                import traceback
+                try:
+                    supabase_id = await db_manager.store_thought(
+                        content,
+                        embedding,
+                        {
+                            **metadata,
+                            "obsidian_path": obsidian_path,
+                            "file_hash": file_hash,
+                            "source": "obsidian",
+                        },
+                    )
+                    _log(
+                        f"[CREATE] ✓✓✓ NEW ENTRY CREATED ✓✓✓ ID={supabase_id} for {obsidian_path}",
+                        "CREATE",
+                    )
 
-                _log(f"[CREATE] Traceback: {traceback.format_exc()}", "CREATE")
-                raise
+                    # Sync tags to thought_tags table
+                    await sync_tags_for_thought(
+                        db_manager, supabase_id, content, metadata.get("topics")
+                    )
+                except Exception as store_err:
+                    _log(f"[CREATE] ✗ store_thought EXCEPTION: {str(store_err)}", "CREATE")
+                    import traceback
 
-            # Update frontmatter with supabase_id
-            # Add to skip_next_modify BEFORE writing to prevent triggering modify handler
-            _log(f"[CREATE] Adding {file_path} to skip_next_modify", "CREATE")
-            self._skip_next_modify.add(file_path)
-            print(f"[WATCHER] Added to skip_next_modify: {file_path}", file=sys.stderr)
+                    _log(f"[CREATE] Traceback: {traceback.format_exc()}", "CREATE")
+                    raise
 
-            _log(
-                f"[CREATE] Updating frontmatter with supabase_id={supabase_id}",
-                "CREATE",
-            )
-            self._update_frontmatter(file_path, supabase_id)
-            print(
-                f"[WATCHER] Updated frontmatter with supabase_id: {supabase_id}",
-                file=sys.stderr,
-            )
+                # Update frontmatter with supabase_id
+                # Add to skip_next_modify BEFORE writing to prevent triggering modify handler
+                _log(f"[CREATE] Adding {file_path} to skip_next_modify", "CREATE")
+                self._skip_next_modify.add(file_path)
+                print(f"[WATCHER] Added to skip_next_modify: {file_path}", file=sys.stderr)
+
+                _log(
+                    f"[CREATE] Updating frontmatter with supabase_id={supabase_id}",
+                    "CREATE",
+                )
+                self._update_frontmatter(file_path, supabase_id)
+                print(
+                    f"[WATCHER] Updated frontmatter with supabase_id: {supabase_id}",
+                    file=sys.stderr,
+                )
+            finally:
+                await lock.stop_auto_renew()
+                await lock.release()
 
             _log(
                 f"[CREATE] COMPLETED: {obsidian_path} → Supabase ID: {supabase_id}",
@@ -1534,14 +1563,23 @@ class ObsidianEventHandler(FileSystemEventHandler):
                                 content
                             )
 
-                            # Update in Supabase
-                            await db_manager.update_thought(
-                                entry_by_id["id"],
-                                content,
-                                embedding,
-                                file_hash,
-                                metadata,
-                            )
+                            # Update in Supabase (with distributed lock)
+                            lock = LazyImport.get_supabase_lock()
+                            if not await lock.acquire("modify_update", Config.LOCK_TTL_SECONDS):
+                                _log(f"[MODIFY] Could not acquire lock, skipping update", "MODIFY")
+                                return
+                            try:
+                                await lock.start_auto_renew()
+                                await db_manager.update_thought(
+                                    entry_by_id["id"],
+                                    content,
+                                    embedding,
+                                    file_hash,
+                                    metadata,
+                                )
+                            finally:
+                                await lock.stop_auto_renew()
+                                await lock.release()
                             _log(f"[DEBUG] _handle_modify 03", "MODIFY")
                             print(
                                 f"[SYNC] Modified: {obsidian_path} (supabase_id: {supabase_id})",
@@ -1604,45 +1642,54 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 embedding_generator = LazyImport.get_embedding_generator()
                 embedding = await embedding_generator.create_embedding(content)
 
-                # Store in Supabase
+                # Store in Supabase (with distributed lock)
                 _log(
-                    f"[MODIFY] Calling db_manager.store_thought() for new entry",
+                    f"[MODIFY] Acquiring distributed lock for new entry",
                     "MODIFY",
                 )
-                supabase_id = await db_manager.store_thought(
-                    content,
-                    embedding,
-                    {
-                        **metadata,
-                        "obsidian_path": obsidian_path,
-                        "file_hash": file_hash,
-                        "source": "obsidian",
-                    },
-                )
-                _log(
-                    f"[MODIFY] *** NEW ENTRY CREATED FROM MODIFY *** ID={supabase_id}",
-                    "MODIFY",
-                )
-
-                # Update frontmatter with supabase_id
-                _log(
-                    f"[MODIFY] Updating frontmatter with new supabase_id={supabase_id}",
-                    "MODIFY",
-                )
-                self._skip_next_modify.add(file_path)
-
-                # Check if file still exists before updating frontmatter
-                if Path(file_path).exists():
-                    self._update_frontmatter(file_path, supabase_id)
-                else:
+                lock = LazyImport.get_supabase_lock()
+                if not await lock.acquire("modify_create", Config.LOCK_TTL_SECONDS):
+                    _log(f"[MODIFY] Could not acquire lock, skipping create", "MODIFY")
+                    return
+                try:
+                    await lock.start_auto_renew()
                     _log(
-                        f"[MODIFY] File no longer exists, skipping frontmatter update: {file_path}",
+                        f"[MODIFY] Calling db_manager.store_thought() for new entry",
                         "MODIFY",
                     )
-                    print(
-                        f"[WATCHER] File no longer exists, skipping frontmatter update: {file_path}",
-                        file=sys.stderr,
+                    supabase_id = await db_manager.store_thought(
+                        content,
+                        embedding,
+                        {
+                            **metadata,
+                            "obsidian_path": obsidian_path,
+                            "file_hash": file_hash,
+                            "source": "obsidian",
+                        },
                     )
+                    _log(
+                        f"[MODIFY] *** NEW ENTRY CREATED FROM MODIFY *** ID={supabase_id}",
+                        "MODIFY",
+                    )
+
+                    # Update frontmatter with supabase_id
+                    _log(
+                        f"[MODIFY] Updating frontmatter with new supabase_id={supabase_id}",
+                        "MODIFY",
+                    )
+                    self._skip_next_modify.add(file_path)
+
+                    # Check if file still exists before updating frontmatter
+                    if Path(file_path).exists():
+                        self._update_frontmatter(file_path, supabase_id)
+                    else:
+                        _log(
+                            f"[MODIFY] File no longer exists, skipping frontmatter update: {file_path}",
+                            "MODIFY",
+                        )
+                finally:
+                    await lock.stop_auto_renew()
+                    await lock.release()
 
                 print(
                     f"[SYNC] Created (from modify): {obsidian_path} → Supabase ID: {supabase_id}",
@@ -1678,15 +1725,24 @@ class ObsidianEventHandler(FileSystemEventHandler):
             embedding_generator = LazyImport.get_embedding_generator()
             embedding = await embedding_generator.create_embedding(content)
 
-            # Update in Supabase
-            await db_manager.update_thought(
-                existing["id"], content, embedding, file_hash, metadata
-            )
+            # Update in Supabase (with distributed lock)
+            lock = LazyImport.get_supabase_lock()
+            if not await lock.acquire("modify_existing", Config.LOCK_TTL_SECONDS):
+                _log(f"[MODIFY] Could not acquire lock, skipping update", "MODIFY")
+                return
+            try:
+                await lock.start_auto_renew()
+                await db_manager.update_thought(
+                    existing["id"], content, embedding, file_hash, metadata
+                )
 
-            # Sync tags to thought_tags table
-            await sync_tags_for_thought(
-                db_manager, existing["id"], content, metadata.get("topics")
-            )
+                # Sync tags to thought_tags table
+                await sync_tags_for_thought(
+                    db_manager, existing["id"], content, metadata.get("topics")
+                )
+            finally:
+                await lock.stop_auto_renew()
+                await lock.release()
 
             _log(f"[DEBUG] _handle_modify 06", "MODIFY")
             print(f"[SYNC] Modified: {obsidian_path}", file=sys.stderr)
@@ -1705,9 +1761,18 @@ class ObsidianEventHandler(FileSystemEventHandler):
         try:
             obsidian_path = self._get_relative_path(file_path)
 
-            # Hard delete from Supabase
-            db_manager = LazyImport.get_db_manager()
-            await db_manager.delete_thought_by_obsidian_path(obsidian_path)
+            # Hard delete from Supabase (with distributed lock)
+            lock = LazyImport.get_supabase_lock()
+            if not await lock.acquire("delete", Config.LOCK_TTL_SECONDS):
+                _log(f"[DELETE] Could not acquire lock, skipping: {obsidian_path}", "DELETE")
+                return
+            try:
+                await lock.start_auto_renew()
+                db_manager = LazyImport.get_db_manager()
+                await db_manager.delete_thought_by_obsidian_path(obsidian_path)
+            finally:
+                await lock.stop_auto_renew()
+                await lock.release()
 
             print(f"[SYNC] Deleted: {obsidian_path}", file=sys.stderr)
         except FileNotFoundError:
@@ -1984,24 +2049,22 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 except yaml.YAMLError:
                     fm_dict = {}
 
-                if "supabase_id" in fm_dict:
-                    # Already has supabase_id, don't modify
-                    new_content = content
-                else:
-                    # Add supabase_id and rebuild
-                    fm_dict["supabase_id"] = supabase_id
-                    try:
-                        updated_fm = yaml.dump(
-                            fm_dict,
-                            default_flow_style=False,
-                            sort_keys=False,
-                            allow_unicode=True,
-                        ).rstrip()
-                    except yaml.YAMLError:
-                        return
+                # Always write the supabase_id to frontmatter.
+                # If the file already has a stale supabase_id (from a deleted DB entry),
+                # it must be overwritten with the new one to break the reindexing loop.
+                fm_dict["supabase_id"] = supabase_id
+                try:
+                    updated_fm = yaml.dump(
+                        fm_dict,
+                        default_flow_style=False,
+                        sort_keys=False,
+                        allow_unicode=True,
+                    ).rstrip()
+                except yaml.YAMLError:
+                    return
 
-                    content_after = "\n".join(lines[frontmatter_end_idx + 1 :])
-                    new_content = f"---\n{updated_fm}\n---\n\n{content_after}"
+                content_after = "\n".join(lines[frontmatter_end_idx + 1 :])
+                new_content = f"---\n{updated_fm}\n---\n\n{content_after}"
 
         Path(file_path).write_text(new_content, encoding="utf-8")
 

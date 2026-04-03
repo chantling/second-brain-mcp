@@ -410,7 +410,60 @@ BEFORE UPDATE ON folders
 FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================================================
--- 7. COMMENTS
+-- 7. SERVER LOCK (distributed cross-instance coordination)
+-- ============================================================================
+
+-- Singleton lock table for coordinating writes across multiple second-brain
+-- instances (e.g., desktop + Raspberry Pi). Uses TTL-based per-operation locking.
+-- Exactly one row (id=1). PostgreSQL row-level locking ensures atomicity.
+CREATE TABLE IF NOT EXISTS server_lock (
+    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    instance_id TEXT,
+    hostname TEXT,
+    pid INTEGER,
+    acquired_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ DEFAULT 'epoch'::timestamptz,
+    operation TEXT
+);
+
+-- Insert the singleton row (ON CONFLICT DO NOTHING for idempotent setup)
+INSERT INTO server_lock (id) VALUES (1) ON CONFLICT DO NOTHING;
+
+COMMENT ON TABLE server_lock IS 'Distributed lock for cross-instance write coordination. TTL-based: locks auto-expire to prevent deadlocks from crashed instances.';
+
+-- RPC function for atomic lock acquisition
+CREATE OR REPLACE FUNCTION acquire_lock(
+    p_instance_id TEXT,
+    p_hostname TEXT,
+    p_pid INTEGER,
+    p_operation TEXT,
+    p_ttl_seconds INTEGER DEFAULT 30
+) RETURNS TABLE(acquired BOOLEAN) AS $$
+DECLARE
+    rows_updated INTEGER;
+BEGIN
+    UPDATE server_lock
+    SET instance_id = p_instance_id,
+        hostname = p_hostname,
+        pid = p_pid,
+        acquired_at = NOW(),
+        expires_at = NOW() + (p_ttl_seconds || ' seconds')::INTERVAL,
+        operation = p_operation
+    WHERE id = 1
+      AND (expires_at < NOW() OR instance_id = p_instance_id);
+
+    GET DIAGNOSTICS rows_updated = ROW_COUNT;
+
+    IF rows_updated > 0 THEN
+        RETURN QUERY SELECT TRUE;
+    ELSE
+        RETURN QUERY SELECT FALSE;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================================
+-- 8. COMMENTS
 -- ============================================================================
 
 -- Document the purpose of key columns and triggers
@@ -428,7 +481,7 @@ COMMENT ON TABLE links IS 'Wiki-link relationships between thoughts for backlink
 COMMENT ON TABLE thought_tags IS 'Many-to-many relationship between thoughts and tags';
 
 -- ============================================================================
--- 8. VERIFICATION
+-- 9. VERIFICATION
 -- ============================================================================
 
 -- Check all tables exist

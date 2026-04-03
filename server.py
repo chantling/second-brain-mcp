@@ -10,8 +10,6 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 from config import Config
 from tools import ToolHandlers
-from instance_lock import InstanceLock
-import portalocker
 import logging
 from datetime import datetime
 
@@ -334,16 +332,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
-async def _heartbeat_loop(lock_manager: InstanceLock, interval: int):
-    """Update heartbeat timestamp periodically"""
-    while True:
-        try:
-            await asyncio.sleep(interval)
-            lock_manager.update_heartbeat()
-        except asyncio.CancelledError:
-            break
-
-
 async def _periodic_orphan_cleanup_loop(interval: int):
     """Periodically clean up orphaned Supabase entries"""
     from obsidian import ObsidianManager
@@ -464,225 +452,6 @@ async def _run_orphan_cleanup_startup():
         traceback.print_exc()
 
 
-async def _lock_retry_loop(
-    lock_manager: InstanceLock,
-    interval: int,
-    jitter: int,
-    is_primary: dict,
-    background_tasks: list,
-):
-    """Periodically attempt to acquire lock if secondary instance"""
-    while True:
-        try:
-            # Add random jitter to avoid race conditions
-            wait_time = interval + random.randint(0, jitter)
-            await asyncio.sleep(wait_time)
-
-            # Check if lock is free
-            lock_status = lock_manager.is_locked()
-            debug_log(f"[LOCK] Retry check: lock_is_held={lock_status}")
-
-            # If lock is held, check if it's stale before attempting takeover
-            if lock_status:
-                is_stale, last_heartbeat = lock_manager.is_lock_stale()
-                debug_log(
-                    f"[LOCK] Lock is held, stale={is_stale}, last_heartbeat={last_heartbeat}"
-                )
-
-                if not is_stale:
-                    # Lock is held by active primary, skip this cycle
-                    continue
-
-                # Lock is stale - attempt cleanup and acquisition
-                debug_log("[LOCK] Lock is stale, attempting to clean up and acquire...")
-
-                if not lock_manager.cleanup_stale_lock():
-                    # Cleanup failed, primary might have recovered
-                    debug_log("[LOCK] Stale lock cleanup failed, will retry next cycle")
-                    continue
-            else:
-                debug_log("[LOCK] Lock appears free, attempting to acquire...")
-
-            # Try to acquire lock (either it was free, or we cleaned up stale lock)
-            try:
-                lock_manager.acquire_lock()
-                debug_log("[LOCK] Acquired lock after retry - starting sync takeover")
-
-                # Get the event loop
-                loop = asyncio.get_running_loop()
-
-                # Start sync takeover
-                try:
-                    await _sync_takeover(
-                        lock_manager, loop, is_primary, background_tasks
-                    )
-                    debug_log("[LOCK] Sync takeover completed successfully")
-                except Exception as e:
-                    print(
-                        f"[ERROR] Sync takeover failed: {e}",
-                        file=sys.stderr,
-                    )
-                    # Release lock since takeover failed
-                    lock_manager.release_lock()
-                    raise
-
-            except portalocker.LockException:
-                # Another instance beat us to it
-                debug_log("[LOCK] Another instance acquired lock first")
-                continue
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(
-                f"[ERROR] Lock retry loop error: {e}",
-                file=sys.stderr,
-            )
-            # Continue retrying even on other errors
-            await asyncio.sleep(5)
-            continue
-
-
-async def _sync_takeover(
-    lock_manager: InstanceLock, event_loop, is_primary: dict, background_tasks: list
-):
-    """Handle sync takeover when acquiring lock"""
-    global _file_watcher_observer
-    from obsidian import ObsidianManager
-    from watcher import start_file_watcher
-    import tools
-
-    try:
-        # Start file watcher
-        debug_log("[SYNC] Starting file watcher for takeover...")
-        vault_path = Path(Config.OBSIDIAN_VAULT_PATH)
-        (
-            _file_watcher_observer,
-            _cleanup_timer_task,
-            _move_processor_task,
-            _heartbeat_task,
-            _deferred_move_task,
-            _blacklist_watch_task,
-        ) = start_file_watcher(
-            vault_path,
-            event_loop,
-            db_manager=tools.db_manager,
-            embedding_generator=tools.embedding_generator,
-            metadata_extractor=tools.metadata_extractor,
-        )
-        debug_log("[SYNC] File watcher started successfully")
-
-        # Add watcher tasks to background_tasks for proper shutdown
-        background_tasks.append(_move_processor_task)
-        background_tasks.append(_cleanup_timer_task)
-        background_tasks.append(_heartbeat_task)
-        background_tasks.append(_deferred_move_task)
-
-        # Run hash-based sync to catch changes during gap period
-        if Config.SYNC_ENABLED:
-            try:
-                debug_log("[SYNC] Running hash-based sync to catch changes...")
-                obsidian_manager = ObsidianManager(
-                    Config.OBSIDIAN_VAULT_PATH, db_manager=tools.db_manager
-                )
-                await obsidian_manager.sync_changed_notes_to_supabase()
-
-                # Clean up orphaned entries after sync
-                sync_result = obsidian_manager.get_last_sync_result()
-                debug_log("[SYNC] Removing orphaned entries...")
-                await obsidian_manager.remove_orphaned_supabase_entries(
-                    exclude_ids=sync_result.get("ids", []) if sync_result else []
-                )
-                debug_log("[SYNC] Orphan cleanup completed")
-            except Exception as e:
-                print(
-                    f"[ERROR] Sync operations failed during takeover: {e}",
-                    file=sys.stderr,
-                )
-                raise
-
-        # Start heartbeat task for new primary
-        debug_log("[LOCK] Starting heartbeat for new primary instance...")
-        takeover_heartbeat = event_loop.create_task(
-            _heartbeat_loop(lock_manager, Config.LOCK_HEARTBEAT_INTERVAL_SECONDS)
-        )
-        background_tasks.append(takeover_heartbeat)
-
-        # Mark as primary
-        is_primary["value"] = True
-        debug_log("[LOCK] Takeover completed - this instance is now primary")
-
-    except Exception as e:
-        print(
-            f"[ERROR] Sync takeover failed: {e}",
-            file=sys.stderr,
-        )
-        # Stop watcher if it was started
-        if _file_watcher_observer:
-            try:
-                _file_watcher_observer.stop()
-                _cleanup_timer_task.cancel()
-                if _move_processor_task:
-                    _move_processor_task.cancel()
-                if _heartbeat_task:
-                    _heartbeat_task.cancel()
-                if _deferred_move_task:
-                    _deferred_move_task.cancel()
-                _file_watcher_observer.join()
-                _file_watcher_observer = None
-                _cleanup_timer_task = None
-                _move_processor_task = None
-                _heartbeat_task = None
-                _deferred_move_task = None
-            except Exception as cleanup_error:
-                print(
-                    f"[ERROR] Failed to cleanup file watcher: {cleanup_error}",
-                    file=sys.stderr,
-                )
-        raise
-
-        # Start heartbeat task
-        debug_log("[LOCK] Starting heartbeat for new primary instance...")
-        heartbeat_task = event_loop.create_task(
-            _heartbeat_loop(lock_manager, Config.LOCK_HEARTBEAT_INTERVAL_SECONDS)
-        )
-
-        # Store heartbeat task for cleanup
-        if not hasattr(_sync_takeover, "heartbeat_task"):
-            _sync_takeover.heartbeat_task = []
-        _sync_takeover.heartbeat_task.append(heartbeat_task)
-
-        debug_log("[LOCK] Takeover completed - this instance is now primary")
-
-    except Exception as e:
-        print(
-            f"[ERROR] Sync takeover failed: {e}",
-            file=sys.stderr,
-        )
-        # Stop watcher if it was started
-        if _file_watcher_observer:
-            try:
-                _file_watcher_observer.stop()
-                _cleanup_timer_task.cancel()
-                if _move_processor_task:
-                    _move_processor_task.cancel()
-                if _heartbeat_task:
-                    _heartbeat_task.cancel()
-                if _deferred_move_task:
-                    _deferred_move_task.cancel()
-                _file_watcher_observer.join()
-                _file_watcher_observer = None
-                _cleanup_timer_task = None
-                _move_processor_task = None
-                _heartbeat_task = None
-                _deferred_move_task = None
-            except Exception as cleanup_error:
-                print(
-                    f"[ERROR] Failed to cleanup file watcher: {cleanup_error}",
-                    file=sys.stderr,
-                )
-        raise
-
-
 async def _run_initial_sync():
     """Run initial sync as a background task"""
     global _initial_sync_running, _initial_sync_complete, _orphan_cleanup_enabled
@@ -724,9 +493,7 @@ async def main():
     # Flag to track shutdown request
     shutdown_requested = False
 
-    # Initialize lock manager and status variables
-    lock_manager = None
-    is_primary = {"value": False}  # Mutable dict so takeover can update it
+    # Initialize status variables
     background_tasks = []
 
     # Set up signal handlers for graceful shutdown
@@ -767,46 +534,20 @@ async def main():
         print(ready_msg, file=sys.stderr)
         logger.info(ready_msg)
 
-        # Initialize lock manager and try to acquire lock
+        # Initialize background tasks
         global _file_watcher_observer
-        logger.info("[MAIN] Initializing lock manager...")
-        lock_manager = InstanceLock(Config)
-        is_primary["value"] = False
         background_tasks = []
 
-        # Run warmup in background (non-blocking) - add after background_tasks init
+        # Run warmup in background (non-blocking)
         logger.info("[MAIN] Creating warmup background task...")
         warmup_task = loop.create_task(_run_warmup_background())
         background_tasks.append(warmup_task)
         logger.info("[MAIN] Warmup task added to background tasks")
 
-        print(
-            f"[LOCK] Lock file location: {lock_manager.lock_file_path}",
-            file=sys.stderr,
-        )
-        print(f"[LOCK] Instance ID: {lock_manager.instance_id}", file=sys.stderr)
-
-        try:
-            lock_manager.acquire_lock()
-            is_primary["value"] = True
-            lock_info = lock_manager.get_lock_info()
-            debug_log(f"[LOCK] Acquired primary lock (PID: {os.getpid()})")
-            debug_log("[LOCK] Starting file watcher for sync")
-        except portalocker.LockException:
-            is_primary["value"] = False
-            lock_info = lock_manager.get_lock_info()
-            debug_log("[LOCK] Another instance running - file watcher disabled")
-            if lock_info:
-                debug_log(
-                    f"[LOCK] Primary lock held by PID: {lock_info.get('pid')} (Instance: {lock_info.get('instance_id')})"
-                )
-            debug_log("[LOCK] Secondary instance operating in read-only mode")
-
-        # Start file watcher if primary and enabled
-        if is_primary["value"] and Config.SYNC_ENABLED:
+        # All instances run the file watcher (distributed lock coordinates writes)
+        if Config.SYNC_ENABLED:
             try:
                 vault_path = Path(Config.OBSIDIAN_VAULT_PATH)
-                # ✅ FIX #1: Handle new return value (6 values: observer, cleanup_task, move_processor_task, heartbeat_task, deferred_move_task, blacklist_watch_task)
                 (
                     _file_watcher_observer,
                     _cleanup_timer_task,
@@ -839,54 +580,32 @@ async def main():
                     background_tasks.append(initial_sync_task)
 
                 # Initial sync of folders (runs in background, non-blocking)
-                if Config.SYNC_ENABLED:
-                    print(
-                        "[SYNC] Folder sync will run on startup. Server accepting requests immediately.",
-                        file=sys.stderr,
-                    )
-                    folder_sync_task = loop.create_task(_run_folder_sync_startup())
-                    background_tasks.append(folder_sync_task)
+                print(
+                    "[SYNC] Folder sync will run on startup. Server accepting requests immediately.",
+                    file=sys.stderr,
+                )
+                folder_sync_task = loop.create_task(_run_folder_sync_startup())
+                background_tasks.append(folder_sync_task)
 
                 # Run orphan cleanup shortly after startup (after initial sync completes)
-                if Config.SYNC_ENABLED:
-                    print(
-                        "[SYNC] Creating orphan cleanup startup task...",
-                        file=sys.stderr,
-                    )
-                    orphan_startup_task = loop.create_task(
-                        _run_orphan_cleanup_startup()
-                    )
-                    background_tasks.append(orphan_startup_task)
-
-                # Start heartbeat task for primary instance
-                heartbeat_task = loop.create_task(
-                    _heartbeat_loop(
-                        lock_manager, Config.LOCK_HEARTBEAT_INTERVAL_SECONDS
-                    )
+                print(
+                    "[SYNC] Creating orphan cleanup startup task...",
+                    file=sys.stderr,
                 )
-                background_tasks.append(heartbeat_task)
+                orphan_startup_task = loop.create_task(
+                    _run_orphan_cleanup_startup()
+                )
+                background_tasks.append(orphan_startup_task)
 
                 # Start periodic orphan cleanup task (every 10 minutes)
                 orphan_cleanup_task = loop.create_task(
-                    _periodic_orphan_cleanup_loop(600)  # 600 seconds = 10 minutes
+                    _periodic_orphan_cleanup_loop(600)
                 )
                 background_tasks.append(orphan_cleanup_task)
             except Exception as e:
                 print(f"[WARNING] Failed to start file watcher: {e}", file=sys.stderr)
-        elif not is_primary["value"] and Config.LOCK_RETRY_ENABLED:
-            # Start lock retry task for secondary instance
-            retry_task = loop.create_task(
-                _lock_retry_loop(
-                    lock_manager,
-                    Config.LOCK_RETRY_INTERVAL_SECONDS,
-                    Config.LOCK_RETRY_JITTER_SECONDS,
-                    is_primary,
-                    background_tasks,
-                )
-            )
-            background_tasks.append(retry_task)
         else:
-            print("[SYNC] File watcher disabled", file=sys.stderr)
+            print("[SYNC] File watcher disabled (SYNC_ENABLED=false)", file=sys.stderr)
 
         # Start MCP server
         async with stdio_server() as (read_stream, write_stream):
@@ -918,23 +637,7 @@ async def main():
             if not task.done():
                 task.cancel()
 
-        # Release lock if we have it
-        # A secondary instance becomes primary only if it acquires the lock via takeover
-        # In that case, is_primary["value"] will have been updated to True
-        lock_held = lock_manager and lock_manager.lock_file is not None
-        print(
-            f"[LOCK] Checking lock cleanup: is_primary={is_primary['value']}, lock_held={lock_held}",
-            file=sys.stderr,
-        )
-
-        if is_primary["value"] or lock_held:
-            if lock_manager:
-                try:
-                    print("[LOCK] Releasing lock on shutdown", file=sys.stderr)
-                    lock_manager.release_lock()
-                    print("[LOCK] Lock released successfully", file=sys.stderr)
-                except Exception as e:
-                    print(f"[ERROR] Error releasing lock: {e}", file=sys.stderr)
+        # Supabase lock auto-expires via TTL — no explicit release needed on shutdown
 
         await shutdown()
 

@@ -41,6 +41,13 @@ class ObsidianManager:
         self.db_manager = db_manager
         self._folders_synced = False
 
+        # Distributed lock for cross-instance coordination
+        self._lock = None
+        if db_manager and hasattr(db_manager, "client"):
+            from supabase_lock import SupabaseLock
+
+            self._lock = SupabaseLock(db_manager.client)
+
     def ensure_special_folders_exist(self):
         """Ensure special folders exist (To-Do, Contacts, Resources/Recipes, ToSort)"""
         special_folders = ["!To-Do!", "Contacts", "Resources/Recipes", "!To-Sort!"]
@@ -1212,6 +1219,24 @@ class ObsidianManager:
                   Used to prevent race condition where orphan cleanup deletes
                   entries that were just created in sync_existing_notes_to_supabase()
         """
+        # Acquire distributed lock for cross-instance coordination
+        if self._lock:
+            if not await self._lock.acquire("orphan_cleanup", Config.LOCK_ORPHAN_CLEANUP_TTL):
+                print("[SYNC] Could not acquire lock for orphan cleanup, skipping", file=sys.stderr)
+                return
+            await self._lock.start_auto_renew(Config.LOCK_ORPHAN_CLEANUP_TTL)
+
+        try:
+            await self._do_remove_orphaned_supabase_entries(exclude_ids)
+        finally:
+            if self._lock:
+                await self._lock.stop_auto_renew()
+                await self._lock.release()
+
+    async def _do_remove_orphaned_supabase_entries(
+        self, exclude_ids: Optional[List[int]] = None
+    ):
+        """Internal orphan cleanup implementation (called with lock held)"""
         exclude_ids = exclude_ids or []
         try:
             # Get all Supabase entries
@@ -1337,7 +1362,11 @@ class ObsidianManager:
             traceback.print_exc()
 
     async def sync_existing_notes_to_supabase(self):
-        """One-time sync of all existing Obsidian notes to Supabase"""
+        """One-time sync of all existing Obsidian notes to Supabase.
+
+        Runs on startup — no lock needed since this is the first operation
+        and there are no competing write operations.
+        """
         import hashlib
         import sys
         from embeddings import EmbeddingGenerator
@@ -1521,6 +1550,22 @@ class ObsidianManager:
         Used during lock takeover to catch changes made during sync gap period.
         Compares file_hash with database to detect changes efficiently.
         """
+        # Acquire distributed lock
+        if self._lock:
+            if not await self._lock.acquire("changed_sync", Config.LOCK_ORPHAN_CLEANUP_TTL):
+                print("[SYNC] Could not acquire lock for changed sync, skipping", file=sys.stderr)
+                return
+            await self._lock.start_auto_renew(Config.LOCK_ORPHAN_CLEANUP_TTL)
+
+        try:
+            await self._do_sync_changed_notes_to_supabase()
+        finally:
+            if self._lock:
+                await self._lock.stop_auto_renew()
+                await self._lock.release()
+
+    async def _do_sync_changed_notes_to_supabase(self):
+        """Internal changed sync implementation (called with lock held)"""
         import hashlib
         import sys
         from embeddings import EmbeddingGenerator
