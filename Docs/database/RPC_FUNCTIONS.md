@@ -456,3 +456,109 @@ DROP FUNCTION IF EXISTS vector_search_v1(vector(1536), INTEGER);
 - [PostgreSQL Functions](https://www.postgresql.org/docs/current/sql-createfunction.html)
 - [pgvector Documentation](https://github.com/pgvector/pgvector)
 - [Advanced PostgreSQL Performance](https://wiki.postgresql.org/wiki/Performance_Optimization)
+
+### `acquire_lock`
+
+Atomically acquires a distributed lock for cross-instance coordination. Used by `SupabaseLock` class.
+
+**Signature:**
+```sql
+acquire_lock(
+    p_instance_id UUID,
+    p_hostname TEXT,
+    p_pid INTEGER,
+    p_operation TEXT,
+    p_ttl_seconds INTEGER
+)
+RETURNS BOOLEAN
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `p_instance_id` | UUID | Yes | Unique identifier for the requesting instance |
+| `p_hostname` | TEXT | Yes | Host machine name |
+| `p_pid` | INTEGER | Yes | Process ID |
+| `p_operation` | TEXT | Yes | Operation name (e.g., "orphan_cleanup", "file_write") |
+| `p_ttl_seconds` | INTEGER | Yes | Time-to-live for the lock in seconds |
+
+**Returns:**
+- `TRUE` if lock was acquired successfully
+- `FALSE` if lock is already held by another non-expired instance
+
+**Behavior:**
+1. If no lock exists or existing lock has expired, acquires the lock
+2. Updates `server_lock` table (singleton row, id=1)
+3. Sets `expires_at` to `NOW() + p_ttl_seconds`
+4. Returns `FALSE` if another instance holds a valid (non-expired) lock
+
+**Usage Example (Python):**
+
+```python
+from supabase_lock import SupabaseLock
+
+lock = SupabaseLock()
+acquired = await lock.acquire(
+    operation="orphan_cleanup",
+    ttl_seconds=300
+)
+
+if acquired:
+    try:
+        # Perform locked operation
+        await perform_cleanup()
+    finally:
+        await lock.release()
+else:
+    print("Lock held by another instance, skipping")
+```
+
+**SQL Implementation:**
+
+```sql
+CREATE OR REPLACE FUNCTION acquire_lock(
+    p_instance_id UUID,
+    p_hostname TEXT,
+    p_pid INTEGER,
+    p_operation TEXT,
+    p_ttl_seconds INTEGER
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Try to acquire: update if expired, or insert if no row exists
+    UPDATE server_lock
+    SET
+        instance_id = p_instance_id,
+        hostname = p_hostname,
+        pid = p_pid,
+        acquired_at = NOW(),
+        expires_at = NOW() + (p_ttl_seconds || ' seconds')::INTERVAL,
+        operation = p_operation
+    WHERE id = 1
+      AND (expires_at IS NULL OR expires_at < NOW());
+
+    -- Check if we got a row
+    IF FOUND THEN
+        RETURN TRUE;
+    END IF;
+
+    -- If no row was updated, check if we need to insert
+    IF NOT EXISTS (SELECT 1 FROM server_lock WHERE id = 1) THEN
+        INSERT INTO server_lock (id, instance_id, hostname, pid, acquired_at, expires_at, operation)
+        VALUES (1, p_instance_id, p_hostname, p_pid, NOW(), NOW() + (p_ttl_seconds || ' seconds')::INTERVAL, p_operation);
+        RETURN TRUE;
+    END IF;
+
+    -- Lock is held by another instance
+    RETURN FALSE;
+END;
+$$;
+```
+
+**Performance Notes:**
+- Uses PostgreSQL row-level locking for atomicity
+- TTL-based auto-expiration prevents deadlocks
+- Singleton row pattern (id=1) ensures only one lock exists

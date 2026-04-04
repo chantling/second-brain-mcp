@@ -85,22 +85,27 @@ LOCK_HEARTBEAT_INTERVAL_SECONDS=20
 
 ```
 second-brain-mcp/
-├── config.py              # Configuration management
-├── database.py            # Database operations
+├── config.py              # Configuration management + blacklist
+├── database.py            # Database operations + duplicate detection
 ├── embeddings.py          # Vector embedding generation
-├── instance_lock.py       # Multi-instance coordination
+├── instance_lock.py       # OS-level file locking (portalocker)
+├── supabase_lock.py       # Distributed DB lock for cross-instance coordination
 ├── links.py              # Wiki-link management
 ├── metadata.py           # AI metadata extraction
 ├── obsidian.py           # Obsidian vault management
-├── search.py             # Search algorithms
+├── search.py             # Hybrid search algorithms
 ├── server.py             # MCP server entry point
-├── tags.py              # Tag management
-├── tools.py             # Tool handlers
+├── tags.py              # Tag operations and suggestions
+├── tag_utils.py         # Shared tag extraction and sync utilities
+├── tools.py             # Tool handlers (14 MCP tools)
+├── watcher.py           # File system monitoring + debouncing + move detection
 ├── verify.py            # Verification utilities
-├── watcher.py           # File system monitoring
+├── manual_sync.py       # Standalone manual sync script
+├── backfill_thought_tags.py  # Tag backfill utility
 ├── requirements.txt      # Python dependencies
 ├── .env               # Environment configuration (not in git)
-└── Tests/              # Test suite
+├── .blacklist         # Blacklist patterns for path exclusion
+└── Tests/              # Test suite (59+ test files)
 ```
 
 ### Key Patterns
@@ -123,18 +128,20 @@ second-brain-mcp/
 
 | Module | Responsibility | Key Classes/Functions |
 |---------|----------------|----------------------|
-| `server.py` | MCP protocol, lifecycle | `main()`, `list_tools()`, `call_tool()` |
-| `tools.py` | Tool implementations | `ToolHandlers` class |
-| `database.py` | Supabase operations | `DatabaseManager` class |
-| `obsidian.py` | Obsidian file management | `ObsidianManager` class |
+| `server.py` | MCP protocol, lifecycle, background tasks | `main()`, `list_tools()`, `call_tool()` |
+| `tools.py` | Tool implementations (14 tools) | `ToolHandlers` class |
+| `database.py` | Supabase operations, duplicate detection | `DatabaseManager` class |
+| `obsidian.py` | Obsidian file management, folder placement | `ObsidianManager` class |
 | `embeddings.py` | Vector generation | `EmbeddingGenerator` class |
-| `search.py` | Search algorithms | `SearchManager` class |
-| `tags.py` | Tag operations | `TagManager` class |
-| `links.py` | Link management | `LinkManager` class |
+| `search.py` | Hybrid search algorithms | `SearchManager` class |
+| `tags.py` | Tag operations and suggestions | `TagManager` class |
+| `tag_utils.py` | Shared tag extraction and sync | `sync_tags_for_thought()` |
+| `links.py` | Link management, graph exploration | `LinkManager` class |
 | `metadata.py` | AI extraction | `MetadataExtractor` class |
-| `watcher.py` | File monitoring | `ObsidianEventHandler` class |
-| `instance_lock.py` | Lock coordination | `InstanceLock` class |
-| `config.py` | Configuration | `Config` class |
+| `watcher.py` | File monitoring, debouncing, move detection | `ObsidianEventHandler`, `LazyImport` |
+| `instance_lock.py` | OS-level lock coordination | `InstanceLock` class |
+| `supabase_lock.py` | Distributed DB lock | `SupabaseLock` class |
+| `config.py` | Configuration + blacklist management | `Config` class |
 
 ### Data Flow
 

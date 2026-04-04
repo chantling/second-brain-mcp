@@ -23,6 +23,7 @@ CREATE TABLE thoughts (
     metadata JSONB,
     source VARCHAR(100) DEFAULT 'manual',
     file_hash VARCHAR(64),
+    content_tsv tsvector,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -35,7 +36,7 @@ CREATE TABLE thoughts (
 | `id` | SERIAL | Unique identifier | Auto-increment |
 | `content` | TEXT | Note content (markdown) | Required |
 | `embedding` | vector(1536) | Vector embedding for semantic search | NULL |
-| `thought_type` | VARCHAR(50) | Type of thought (knowledge, recipe, todo, contact, guide) | 'knowledge' |
+| `thought_type` | VARCHAR(50) | Type of thought (knowledge, recipe, todo, contact, guide, note, other) | 'knowledge' |
 | `topics` | TEXT[] | Array of topic tags | [] |
 | `people` | TEXT[] | Array of people mentioned | [] |
 | `action_items` | TEXT[] | Array of action items | [] |
@@ -43,6 +44,7 @@ CREATE TABLE thoughts (
 | `metadata` | JSONB | Additional metadata as JSON | {} |
 | `source` | VARCHAR(100) | Source of the thought (manual, sync, etc.) | 'manual' |
 | `file_hash` | VARCHAR(64) | SHA-256 hash of file content | NULL |
+| `content_tsv` | tsvector | Full-text search vector (auto-updated via trigger) | NULL |
 | `created_at` | TIMESTAMP | Creation timestamp | NOW() |
 | `updated_at` | TIMESTAMP | Last update timestamp | NOW() |
 
@@ -65,6 +67,9 @@ CREATE INDEX thoughts_obsidian_path_idx ON thoughts(obsidian_path);
 
 -- Hash index for sync change detection
 CREATE INDEX thoughts_file_hash_idx ON thoughts(file_hash);
+
+-- Full-text search index (GIN)
+CREATE INDEX thoughts_content_tsv_idx ON thoughts USING gin(content_tsv);
 ```
 
 **Metadata JSONB Structure:**
@@ -233,6 +238,40 @@ CREATE INDEX links_source_thought_id_idx ON links(source_thought_id);
 CREATE UNIQUE INDEX links_unique_idx ON links(source_thought_id, target_thought_id, link_type);
 ```
 
+### 6. `server_lock`
+
+Distributed lock table for cross-instance coordination (singleton row, id=1).
+
+```sql
+CREATE TABLE server_lock (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    instance_id UUID NOT NULL,
+    hostname VARCHAR(255),
+    pid INTEGER,
+    acquired_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE,
+    operation VARCHAR(100)
+);
+```
+
+**Columns:**
+
+| Column | Type | Description |
+|--------|-------|-------------|
+| `id` | INTEGER | Singleton row (always 1) |
+| `instance_id` | UUID | Unique instance identifier |
+| `hostname` | VARCHAR | Host machine name |
+| `pid` | INTEGER | Process ID |
+| `acquired_at` | TIMESTAMP | When lock was acquired |
+| `expires_at` | TIMESTAMP | When lock expires (TTL-based) |
+| `operation` | VARCHAR | Current operation holding the lock |
+
+**Purpose:**
+- Prevents race conditions between multiple server instances
+- TTL-based auto-expiration prevents deadlocks from crashed instances
+- Used by `SupabaseLock` class in `supabase_lock.py`
+- Atomic acquisition via `acquire_lock` RPC function
+
 ## PostgreSQL Functions (RPC)
 
 ### `vector_search`
@@ -342,6 +381,19 @@ CREATE TRIGGER folders_update_updated_at
     BEFORE UPDATE ON folders
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 ```
+
+### `update_content_tsv`
+
+Automatically update `content_tsv` for full-text search when content changes.
+
+```sql
+CREATE TRIGGER thoughts_update_content_tsv
+    BEFORE INSERT OR UPDATE ON thoughts
+    FOR EACH ROW EXECUTE FUNCTION
+    tsvector_update_trigger(content_tsv, 'pg_catalog.english', content);
+```
+
+**Note:** The FTS language is configurable via `Config.FTS_LANGUAGE`.
 
 ## Data Types
 

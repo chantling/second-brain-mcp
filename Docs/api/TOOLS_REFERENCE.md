@@ -4,7 +4,7 @@ Complete reference for all MCP tools provided by the Second Brain Server.
 
 ## Overview
 
-The Second Brain MCP Server provides 13 tools for interacting with your knowledge base. All tools return data in consistent formats and include error handling.
+The Second Brain MCP Server provides 14 tools for interacting with your knowledge base. All tools return data in consistent formats and include error handling.
 
 ## Common Response Format
 
@@ -70,12 +70,26 @@ Store a thought in both Supabase (with vector embedding) and Obsidian (as markdo
 
 **Behavior:**
 
-1. Extracts metadata if not provided (uses AI)
+1. Extracts metadata if not provided (uses AI via configured provider)
 2. Generates vector embedding for content
-3. Stores in Supabase with embedding
-4. Determines optimal folder (semantic matching)
-5. Creates markdown file in Obsidian vault
-6. Returns both IDs and file path
+3. Checks for duplicates (3-tier: video_id, exact URL, heuristic URL)
+4. Handles duplicates based on `DUPLICATE_HANDLING_MODE` (prompt/skip/overwrite)
+5. Stores in Supabase with embedding
+6. Syncs tags (from frontmatter + inline `#tags`)
+7. Determines optimal folder (semantic matching if enabled)
+8. Creates markdown file in Obsidian vault with frontmatter
+9. Updates database with obsidian_path
+10. Returns both IDs and file path
+
+**Duplicate Detection Tiers:**
+- **Tier 1 (High confidence)**: Exact `video_id` match → block/prompt/overwrite
+- **Tier 2 (High confidence)**: Exact URL match (normalized) → block/prompt/overwrite
+- **Tier 3 (Medium confidence)**: Heuristic URL match (tracking params removed) → store with warning
+
+**Duplicate Handling Modes:**
+- `prompt` (default): Returns duplicate info for LLM to decide
+- `skip`: Silently skips storage, returns existing thought info
+- `overwrite`: Updates existing thought in place
 
 **Example:**
 
@@ -685,6 +699,61 @@ results = await hybrid_search(
 
 ---
 
+### 14. search_by_keyword
+
+Search for exact words or phrases in note content using PostgreSQL full-text search (tsvector). Finds exact matches regardless of topic tags.
+
+**Endpoint:** `search_by_keyword`
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|-------|-----------|-------------|
+| `query` | string | Yes | Exact word or phrase to search for |
+| `limit` | integer | No | Maximum results (default: 10) |
+
+**Returns:**
+
+```json
+[
+  {
+    "id": 123,
+    "content": "Note content containing the exact word...",
+    "thought_type": "knowledge",
+    "topics": ["electronics"],
+    "obsidian_path": "Resources/Electronics/2026-03-04-Note.md",
+    "obsidian_url": "obsidian://open?file=Resources/Electronics/2026-03-04-Note.md",
+    "score": 0.95,
+    "similarity": 0.95,
+    "created_at": "2026-03-04T10:00:00Z"
+  },
+  // ... more results
+]
+```
+
+**Behavior:**
+
+1. Uses PostgreSQL full-text search on `content_tsv` column (tsvector with GIN index)
+2. Falls back to ILIKE keyword search if full-text search fails
+3. Results scored by position (earlier matches score higher)
+4. Includes `obsidian_url` for easy Obsidian navigation
+
+**Example:**
+
+```python
+# Search for exact word
+results = await search_by_keyword(query="soldering")
+
+# Search for exact phrase
+results = await search_by_keyword(query="circuit design", limit=5)
+```
+
+**Performance:** ~0.26s for exact word matches (GIN index O(1) lookups)
+
+**Note:** This tool is different from `semantic_search` which finds conceptually similar content. `search_by_keyword` finds exact word matches regardless of semantic meaning.
+
+---
+
 ## Error Handling
 
 All tools handle errors gracefully:
@@ -727,8 +796,8 @@ All tools handle errors gracefully:
 
 | Tool | Typical Response Time | Notes |
 |-------|---------------------|--------|
-| `store_thought` | 2-4s | Depends on AI metadata extraction |
-| `semantic_search` | < 1s | After connection warmup |
+| `store_thought` | 3-13s | Depends on AI metadata extraction + embedding |
+| `semantic_search` | 1-3s | After connection warmup, API-bound |
 | `list_recent` | < 0.5s | Simple database query |
 | `get_thought` | < 0.5s | Single record lookup |
 | `search_by_topic` | < 0.5s | Tag-based query |
@@ -740,6 +809,7 @@ All tools handle errors gracefully:
 | `find_related_notes` | 1-2s | Complex graph traversal |
 | `suggest_tags` | < 1s | Vector tag matching |
 | `hybrid_search` | 1-2s | Multiple scoring phases |
+| `search_by_keyword` | < 0.3s | FTS with GIN index (O(1) lookups) |
 
 ## Usage Patterns
 

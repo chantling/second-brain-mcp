@@ -165,19 +165,20 @@ ls "C:/Users/YourName/Obsidian/Vault"
 
 **Symptom:**
 ```
-Error: API timeout after 240 seconds
+Error: Failed to create embedding: API timeout or error
 ```
 
 **Solution:**
 ```python
-# Check embeddings.py:16 - verify timeout is 240
-self.client = OpenAI(
-    timeout=240,  # Should be 240
-    max_retries=3
-)
+# Check embeddings.py - uses requests library (sync, wrapped in executor)
+# Text is truncated to 8192 chars before sending
+# Uses configured model, base_url, and dimensions
 
 # Test API directly
-curl https://your-embedding-api.com/embeddings -H "Authorization: Bearer YOUR_KEY"
+curl -X POST https://your-embedding-api.com/v1/embeddings \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen/qwen3-embedding-8b","input":"test","dimensions":1536}'
 ```
 
 ### Metadata API Slow
@@ -189,11 +190,20 @@ store_thought takes > 60 seconds
 
 **Solution:**
 ```python
-# Check metadata.py:25 - verify timeout
-client = AsyncClient(
-    timeout=240,  # Should be 240
-    base_url=Config.METADATA_BASE_URL
+# Check metadata.py - verify timeout and retries
+from openai import OpenAI
+client = OpenAI(
+    api_key=Config.METADATA_API_KEY,
+    base_url=Config.METADATA_BASE_URL,
+    timeout=240,  # Should be 240 seconds
+    max_retries=3
 )
+
+# Test API directly
+curl -X POST https://your-metadata-api.com/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.7","messages":[{"role":"user","content":"test"}]}'
 ```
 
 ### First Search Timeout (Fixed in Recent Version)
@@ -531,7 +541,7 @@ ps aux | grep python
 # 2. Stop old instances
 # Kill the process (save work first!)
 
-# 3. Clean up lock file
+# 3. Clean up lock file (both OS-level and DB-level)
 rm .server_lock
 
 # 4. Start fresh instance
@@ -576,6 +586,28 @@ LOCK_HEARTBEAT_INTERVAL_SECONDS = 20  # Primary heartbeat frequency
 
 # Manually remove lock to force takeover
 rm .server_lock
+
+# Also check Supabase distributed lock
+# In Supabase SQL editor:
+SELECT * FROM server_lock WHERE id = 1;
+# If expired, it will be automatically reclaimed
+```
+
+### Distributed Lock (SupabaseLock) Issues
+
+**Symptom:**
+```
+Operations failing with lock timeout despite no other instances running
+```
+
+**Solution:**
+```sql
+-- Check current lock state
+SELECT * FROM server_lock WHERE id = 1;
+
+-- If lock is stale (expires_at < NOW()), it will auto-expire
+-- If stuck, manually clear:
+UPDATE server_lock SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = 1;
 ```
 
 ## Debug Mode
