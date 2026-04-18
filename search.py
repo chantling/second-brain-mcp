@@ -14,16 +14,14 @@ class SearchManager:
     """Enhanced search with multiple search strategies"""
 
     def __init__(
-        self, db_manager: DatabaseManager, embedding_generator: EmbeddingGenerator
+        self,
+        db_manager: DatabaseManager,
+        embedding_generator: EmbeddingGenerator,
+        reranker=None,
     ):
-        """Initialize search manager with database and embedding generator dependencies.
-        
-        Stores references to the database manager for executing queries and the
-        embedding generator for creating query embeddings. Provides multiple search
-        strategies including hybrid search combining vector and keyword matching.
-        """
         self.db_manager = db_manager
         self.embedding_generator = embedding_generator
+        self.reranker = reranker
 
     async def hybrid_search(
         self,
@@ -31,6 +29,7 @@ class SearchManager:
         limit: int = 10,
         filters: Optional[Dict] = None,
         weights: Optional[Dict] = None,
+        use_rerank: bool = True,
     ) -> List[Dict]:
         """
         Hybrid search combining vector similarity and keyword matching.
@@ -40,6 +39,7 @@ class SearchManager:
             limit: Max results
             filters: Dict of filters (type, folder, tags, date_range)
             weights: Dict of weights for scoring (vector: 0.7, keywords: 0.3)
+            use_rerank: Whether to apply reranking (default True)
 
         Returns:
             Ranked list of results with scores
@@ -65,6 +65,13 @@ class SearchManager:
 
         # Sort by combined score
         scored_results.sort(key=lambda x: x.get("combined_score", 0.0), reverse=True)
+
+        # Rerank if enabled
+        if use_rerank and self.reranker is not None:
+            candidates = scored_results[:limit * 2]
+            scored_results = await self.reranker.rerank(
+                query, candidates, top_n=limit
+            )
 
         return scored_results[:limit]
 

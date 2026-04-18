@@ -73,6 +73,15 @@ class Config:
     SEARCH_KEYWORD_WEIGHT = float(os.getenv("SEARCH_KEYWORD_WEIGHT", "0.3"))
     SEARCH_RECENCY_WEIGHT = float(os.getenv("SEARCH_RECENCY_WEIGHT", "0.0"))
 
+    # Reranking Configuration (Cohere via OpenRouter)
+    RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() == "true"
+    RERANK_API_KEY = os.getenv("RERANK_API_KEY")
+    RERANK_BASE_URL = os.getenv("RERANK_BASE_URL", "https://openrouter.ai/api/v1")
+    RERANK_MODEL = os.getenv("RERANK_MODEL", "cohere/rerank-4-pro")
+    RERANK_TIMEOUT = int(os.getenv("RERANK_TIMEOUT", "10"))
+    RERANK_MIN_RELEVANCE_SCORE = float(os.getenv("RERANK_MIN_RELEVANCE_SCORE", "0.0"))
+    RERANK_MAX_DOC_LENGTH = int(os.getenv("RERANK_MAX_DOC_LENGTH", "4000"))
+
     # Database Configuration
     DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", "10"))
 
@@ -155,6 +164,20 @@ class Config:
             raise ValueError(
                 "Missing required environment variable: METADATA_API_KEY (or ZAI_API_KEY)"
             )
+
+        if not cls.RERANK_API_KEY and cls.EMBEDDING_API_KEY:
+            print(
+                "[INFO] Using EMBEDDING_API_KEY for reranking (RERANK_API_KEY not set)",
+                file=sys.stderr,
+            )
+            cls.RERANK_API_KEY = cls.EMBEDDING_API_KEY
+
+        if cls.RERANK_ENABLED and not cls.RERANK_API_KEY:
+            print(
+                "[WARNING] Reranking enabled but no API key available. Disabling reranking.",
+                file=sys.stderr,
+            )
+            cls.RERANK_ENABLED = False
 
         print("[OK] All configuration validated successfully", file=sys.stderr)
 

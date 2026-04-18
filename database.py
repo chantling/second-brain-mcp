@@ -69,6 +69,16 @@ class DatabaseManager:
         # Initialize Supabase client
         self.client: Client = create_client(self.supabase_url, self.supabase_secret_key)
 
+    async def _async_execute(self, query):
+        """Run a synchronous Supabase query in a thread to avoid blocking the event loop.
+
+        The Supabase Python client uses synchronous httpx internally.
+        Without this wrapper, every .execute() call blocks the event loop,
+        preventing the MCP server from responding to initialize requests
+        during background sync operations.
+        """
+        return await asyncio.to_thread(query.execute)
+
     async def store_thought(
         self, content: str, embedding: List[float], metadata: Dict
     ) -> int:
@@ -103,7 +113,7 @@ class DatabaseManager:
         try:
             logger.info("[DB] Executing Supabase insert...")
             db_start = datetime.now()
-            response = self.client.table("thoughts").insert(thought_data).execute()
+            response = await self._async_execute(self.client.table("thoughts").insert(thought_data))
             db_elapsed = (datetime.now() - db_start).total_seconds()
             logger.info(f"[DB] Supabase insert completed in {db_elapsed:.2f}s")
         except Exception as insert_err:
@@ -233,8 +243,8 @@ class DatabaseManager:
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for supabase_id={thought_id}"
             debug_log_to_file(log_msg)
 
-            response = (
-                self.client.table("thoughts").select("*").eq("id", thought_id).execute()
+            response = await self._async_execute(
+                self.client.table("thoughts").select("*").eq("id", thought_id)
             )
 
             if response.data:
@@ -404,8 +414,8 @@ class DatabaseManager:
                 path = folder_info["path"]
 
                 # Check if folder exists
-                existing = (
-                    self.client.table("folders").select("*").eq("path", path).execute()
+                existing = await self._async_execute(
+                    self.client.table("folders").select("*").eq("path", path)
                 )
 
                 # Use pre-computed embedding if provided (from cache or DB)
@@ -432,13 +442,13 @@ class DatabaseManager:
 
                 if not existing.data:
                     # Create new folder
-                    self.client.table("folders").insert(folder_data).execute()
+                    await self._async_execute(self.client.table("folders").insert(folder_data))
                     stats["created"] += 1
                 else:
                     # Update existing folder
-                    self.client.table("folders").update(folder_data).eq(
+                    await self._async_execute(self.client.table("folders").update(folder_data).eq(
                         "path", path
-                    ).execute()
+                    ))
                     stats["updated"] += 1
 
             except Exception as e:
@@ -464,12 +474,11 @@ class DatabaseManager:
         """
         try:
             # Get all folders with embeddings
-            response = (
+            response = await self._async_execute(
                 self.client.table("folders")
                 .select(
                     "path, folder_name, full_path_hierarchy, description, embedding"
                 )
-                .execute()
             )
 
             if not response.data:
@@ -537,11 +546,10 @@ class DatabaseManager:
 
             traceback.print_exc()
             try:
-                response = (
+                response = await self._async_execute(
                     self.client.table("folders")
                     .select("path, folder_name, full_path_hierarchy, description")
                     .limit(limit)
-                    .execute()
                 )
 
                 results = response.data if response.data else []
@@ -559,13 +567,12 @@ class DatabaseManager:
     async def get_all_folders(self) -> List[Dict]:
         """Get all folders from database"""
         try:
-            response = (
+            response = await self._async_execute(
                 self.client.table("folders")
                 .select(
                     "path, folder_name, full_path_hierarchy, description, created_at, updated_at"
                 )
                 .order("path")
-                .execute()
             )
 
             return response.data if response.data else []
@@ -583,11 +590,10 @@ class DatabaseManager:
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for obsidian_path={obsidian_path}"
             debug_log_to_file(log_msg)
 
-            response = (
+            response = await self._async_execute(
                 self.client.table("thoughts")
                 .select("*")
                 .eq("obsidian_path", obsidian_path)
-                .execute()
             )
 
             if response.data:
@@ -635,8 +641,8 @@ class DatabaseManager:
     async def get_all_thoughts(self) -> List[Dict]:
         """Get all thoughts from database (for orphan verification)"""
         try:
-            response = (
-                self.client.table("thoughts").select("id, obsidian_path").execute()
+            response = await self._async_execute(
+                self.client.table("thoughts").select("id, obsidian_path")
             )
 
             return response.data if response.data else []
@@ -650,21 +656,21 @@ class DatabaseManager:
         try:
             # _log(f"[DB:DELETE] Deleting thought by ID: {thought_id}", "DELETE")
             # Delete related links
-            self.client.table("links").delete().eq(
+            await self._async_execute(self.client.table("links").delete().eq(
                 "source_thought_id", thought_id
-            ).execute()
+            ))
 
-            self.client.table("links").delete().eq(
+            await self._async_execute(self.client.table("links").delete().eq(
                 "target_thought_id", thought_id
-            ).execute()
+            ))
 
             # Delete tag associations
-            self.client.table("thought_tags").delete().eq(
+            await self._async_execute(self.client.table("thought_tags").delete().eq(
                 "thought_id", thought_id
-            ).execute()
+            ))
 
             # Delete thought
-            self.client.table("thoughts").delete().eq("id", thought_id).execute()
+            await self._async_execute(self.client.table("thoughts").delete().eq("id", thought_id))
 
             _log(f"[DB:DELETE] Successfully deleted thought ID: {thought_id}", "DELETE")
             return True
@@ -695,11 +701,10 @@ class DatabaseManager:
             update_data["metadata"] = metadata
             update_data["thought_type"] = metadata.get("type", "knowledge")
 
-        response = (
+        response = await self._async_execute(
             self.client.table("thoughts")
             .update(update_data)
             .eq("id", thought_id)
-            .execute()
         )
 
         if not response.data:
@@ -724,11 +729,10 @@ class DatabaseManager:
             "updated_at": datetime.now().isoformat(),
         }
 
-        response = (
+        response = await self._async_execute(
             self.client.table("thoughts")
             .update(thought_data)
             .eq("id", thought_id)
-            .execute()
         )
 
         if not response.data:
@@ -758,11 +762,10 @@ class DatabaseManager:
         # Tier 1: Exact video_id match (highest priority)
         if video_id:
             try:
-                response = (
+                response = await self._async_execute(
                     self.client.table("thoughts")
                     .select("id, content, metadata, created_at, obsidian_path")
                     .eq("metadata->>video_id", video_id)
-                    .execute()
                 )
 
                 if response.data:
@@ -780,11 +783,10 @@ class DatabaseManager:
             try:
                 normalized_url = basic_normalize_url(url)
 
-                response = (
+                response = await self._async_execute(
                     self.client.table("thoughts")
                     .select("id, content, metadata, created_at, obsidian_path")
                     .not_.is_("metadata->>url", "null")
-                    .execute()
                 )
 
                 for thought in response.data:
@@ -806,11 +808,10 @@ class DatabaseManager:
             try:
                 normalized_url = heuristic_normalize_url(url)
 
-                response = (
+                response = await self._async_execute(
                     self.client.table("thoughts")
                     .select("id, content, metadata, created_at, obsidian_path")
                     .not_.is_("metadata->>url", "null")
-                    .execute()
                 )
 
                 for thought in response.data:
@@ -833,11 +834,10 @@ class DatabaseManager:
     async def update_obsidian_path(self, thought_id: int, new_path: str):
         """Update the obsidian_path for a thought (used for file renames)"""
         try:
-            response = (
+            response = await self._async_execute(
                 self.client.table("thoughts")
                 .update({"obsidian_path": new_path})
                 .eq("id", thought_id)
-                .execute()
             )
 
             if not response.data:
@@ -852,11 +852,10 @@ class DatabaseManager:
         _log(f"[DB:DELETE] Deleting folder: {folder_path}", "DELETE")
         try:
             # Delete folder entry from database
-            response = (
+            response = await self._async_execute(
                 self.client.table("folders")
                 .delete()
                 .eq("folder_path", folder_path)
-                .execute()
             )
 
             if not response.data:
@@ -876,13 +875,13 @@ class DatabaseManager:
 
         try:
             # Delete existing links for this thought
-            self.client.table("links").delete().eq(
+            await self._async_execute(self.client.table("links").delete().eq(
                 "source_thought_id", thought_id
-            ).execute()
+            ))
 
             # Insert new links
             for link_data in links:
-                self.client.table("links").insert(link_data).execute()
+                await self._async_execute(self.client.table("links").insert(link_data))
         except Exception as e:
             print(f"[WARNING] Failed to store links: {e}", file=sys.stderr)
 
@@ -895,32 +894,31 @@ class DatabaseManager:
             # Create tags if they don't exist
             for tag_name in tag_names:
                 try:
-                    self.client.table("tags").insert({"name": tag_name}).execute()
+                    await self._async_execute(self.client.table("tags").insert({"name": tag_name}))
                 except Exception:
-                    pass  # Tag already exists
+                    pass
 
             # Delete existing tag associations
-            self.client.table("thought_tags").delete().eq(
+            await self._async_execute(self.client.table("thought_tags").delete().eq(
                 "thought_id", thought_id
-            ).execute()
+            ))
 
             # Get tag IDs
             tag_ids = []
             for tag_name in tag_names:
-                response = (
+                response = await self._async_execute(
                     self.client.table("tags")
                     .select("id")
                     .eq("name", tag_name)
-                    .execute()
                 )
                 if response.data:
                     tag_ids.append(response.data[0]["id"])
 
             # Insert new associations
             for tag_id in tag_ids:
-                self.client.table("thought_tags").insert(
+                await self._async_execute(self.client.table("thought_tags").insert(
                     {"thought_id": thought_id, "tag_id": tag_id}
-                ).execute()
+                ))
         except Exception as e:
             print(f"[WARNING] Failed to sync tags: {e}", file=sys.stderr)
 
@@ -996,11 +994,10 @@ class DatabaseManager:
     async def get_backlinks(self, thought_id: int) -> List[Dict]:
         """Get all notes that link to this thought"""
         try:
-            response = (
+            response = await self._async_execute(
                 self.client.table("links")
                 .select("*,source_thought:thoughts!links_source_thought_id_fkey(*)")
                 .eq("target_thought_id", thought_id)
-                .execute()
             )
 
             return response.data if response.data else []
@@ -1011,11 +1008,10 @@ class DatabaseManager:
     async def get_outlinks(self, thought_id: int) -> List[Dict]:
         """Get all notes this thought links to"""
         try:
-            response = (
+            response = await self._async_execute(
                 self.client.table("links")
                 .select("*,target_thought:thoughts!links_target_thought_id_fkey(*)")
                 .eq("source_thought_id", thought_id)
-                .execute()
             )
 
             return response.data if response.data else []

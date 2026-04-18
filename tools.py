@@ -11,6 +11,7 @@ from obsidian import ObsidianManager
 from embeddings import EmbeddingGenerator
 from metadata import MetadataExtractor
 from tag_utils import sync_tags_for_thought
+from reranker import Reranker
 
 # Get logger for this module
 logger = logging.getLogger('second_brain.tools')
@@ -23,6 +24,7 @@ db_manager = DatabaseManager()
 obsidian_manager = ObsidianManager(Config.OBSIDIAN_VAULT_PATH, db_manager=db_manager)
 embedding_generator = EmbeddingGenerator()
 metadata_extractor = MetadataExtractor()
+reranker = Reranker() if Config.RERANK_ENABLED else None
 
 
 class ToolHandlers:
@@ -179,7 +181,8 @@ class ToolHandlers:
             return result
 
     async def semantic_search(
-        self, query: str, limit: int = 10, topics: Optional[List[str]] = None
+        self, query: str, limit: int = 10, topics: Optional[List[str]] = None,
+        rerank: Optional[bool] = None
     ) -> List[Dict]:
         """Search thoughts by semantic similarity"""
         try:
@@ -203,6 +206,14 @@ class ToolHandlers:
                     for r in results
                     if any(topic in (r.get("topics") or []) for topic in topics)
                 ]
+
+            # Determine whether to rerank
+            should_rerank = self._should_rerank(rerank)
+
+            if should_rerank and reranker is not None and results:
+                logger.info("[TOOLS] Applying reranking to semantic search results...")
+                results = await reranker.rerank(query, results, top_n=limit)
+                logger.info(f"[TOOLS] Reranking complete, {len(results)} results")
 
             # Enrich with Obsidian paths
             for result in results:
@@ -472,12 +483,13 @@ class ToolHandlers:
         limit: int = 10,
         filters: Optional[Dict] = None,
         weights: Optional[Dict] = None,
+        rerank: Optional[bool] = None,
     ) -> List[Dict]:
         """Hybrid search with vector + keywords"""
         try:
             from search import SearchManager
 
-            search_manager = SearchManager(db_manager, embedding_generator)
+            search_manager = SearchManager(db_manager, embedding_generator, reranker=reranker)
 
             # Default weights from config
             if weights is None:
@@ -487,7 +499,11 @@ class ToolHandlers:
                     "recency": Config.SEARCH_RECENCY_WEIGHT,
                 }
 
-            results = await search_manager.hybrid_search(query, limit, filters, weights)
+            should_rerank = self._should_rerank(rerank)
+
+            results = await search_manager.hybrid_search(
+                query, limit, filters, weights, use_rerank=should_rerank
+            )
 
             # Enrich with Obsidian URLs
             for result in results:
@@ -499,6 +515,22 @@ class ToolHandlers:
             return results
         except Exception as e:
             return [{"error": str(e), "message": "Failed to perform hybrid search"}]
+
+    def _should_rerank(self, rerank_param: Optional[bool]) -> bool:
+        """Determine whether reranking should be applied.
+
+        Args:
+            rerank_param: Per-query override from caller.
+                None: use global config default (RERANK_ENABLED).
+                True: force reranking on (even if globally disabled).
+                False: force reranking off.
+
+        Returns:
+            Whether to apply reranking.
+        """
+        if rerank_param is not None:
+            return rerank_param
+        return Config.RERANK_ENABLED
 
     async def _store_new_thought(
         self,
@@ -829,3 +861,5 @@ class ToolHandlers:
         await db_manager.close()
         await embedding_generator.close()
         await metadata_extractor.close()
+        if reranker is not None:
+            await reranker.close()

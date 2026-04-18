@@ -126,6 +126,10 @@ async def list_tools() -> list[Tool]:
                         "items": {"type": "string"},
                         "description": "Filter by topics",
                     },
+                    "rerank": {
+                        "type": "boolean",
+                        "description": "Enable/disable Cohere reranking for this query (overrides RERANK_ENABLED config). Default: use config setting.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -265,7 +269,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="hybrid_search",
-            description="Advanced search with vector + keywords + filters. The server is immediately available, though results may be incomplete during initial background sync. Subsequent calls are fast.",
+            description="Advanced search with vector + keywords + filters. The server is immediately available, though search results may be incomplete during initial background sync. Subsequent calls are fast.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -276,6 +280,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Filters (type, folder, tags)",
                     },
                     "weights": {"type": "object", "description": "Scoring weights"},
+                    "rerank": {
+                        "type": "boolean",
+                        "description": "Enable/disable Cohere reranking for this query (overrides RERANK_ENABLED config). Default: use config setting.",
+                    },
                 },
                 "required": ["query"],
             },
