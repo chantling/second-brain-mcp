@@ -167,6 +167,10 @@ class DatabaseManager:
 
         # Fallback: Use direct SQL with vector comparison
         try:
+            # Validate limit to prevent SQL injection
+            if not isinstance(limit, int) or limit < 1 or limit > 1000:
+                limit = 10
+
             # Format embedding for PostgreSQL
             embedding_str = "[" + ",".join([str(x) for x in query_embedding]) + "]"
 
@@ -855,7 +859,7 @@ class DatabaseManager:
             response = await self._async_execute(
                 self.client.table("folders")
                 .delete()
-                .eq("folder_path", folder_path)
+                .eq("path", folder_path)
             )
 
             if not response.data:

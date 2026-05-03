@@ -91,6 +91,9 @@ class ObsidianManager:
             debug_info["folder"] = folder_path
             debug_info["folder_confidence"] = confidence
 
+        # Validate folder path to prevent path traversal
+        folder_path = self._validate_folder_path(folder_path)
+
         # Ensure folder exists
         self._ensure_folder_exists(folder_path)
 
@@ -167,7 +170,7 @@ class ObsidianManager:
 
         # Priority 2: Manual override via metadata (100% confidence)
         if "folder" in metadata:
-            folder = metadata["folder"]
+            folder = self._validate_folder_path(metadata["folder"])
             return (folder, 1.0)
 
         # Priority 3: Exact folder name match (100% confidence)
@@ -336,6 +339,16 @@ class ObsidianManager:
             return any(kw in content for kw in resource_keywords)
 
         return False
+
+    def _validate_folder_path(self, folder_path: str) -> str:
+        """Validate that folder_path stays within the vault. Returns sanitized path."""
+        if not folder_path:
+            return "!To-Sort!"
+        full = (self.vault_path / folder_path).resolve()
+        vault_resolved = self.vault_path.resolve()
+        if not str(full).startswith(str(vault_resolved)):
+            return "!To-Sort!"
+        return folder_path
 
     def _ensure_folder_exists(self, folder_path: str):
         """Create folder path if it doesn't exist"""
@@ -954,7 +967,10 @@ class ObsidianManager:
             dot_product = np.dot(note_array, folder_array)
             norm_note = np.linalg.norm(note_array)
             norm_folder = np.linalg.norm(folder_array)
-            similarity = dot_product / (norm_note * norm_folder)
+            if norm_note == 0 or norm_folder == 0:
+                similarity = 0.0
+            else:
+                similarity = dot_product / (norm_note * norm_folder)
 
             if similarity > best_similarity:
                 best_similarity = similarity

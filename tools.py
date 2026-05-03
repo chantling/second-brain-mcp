@@ -552,8 +552,7 @@ class ToolHandlers:
         logger.info(f"[STORE] _store_new_thought started - type: {metadata.get('type', 'unknown')}")
         
         # Determine folder using semantic search if enabled and folders are synced
-        global _folders_synced
-        if Config.SEMANTIC_FOLDER_PLACEMENT and _folders_synced:
+        if Config.SEMANTIC_FOLDER_PLACEMENT and obsidian_manager._folders_synced:
             logger.info("[STORE] Running semantic folder search...")
             folder, confidence = await obsidian_manager._find_semantic_folder_match(
                 content, metadata
@@ -641,7 +640,9 @@ class ToolHandlers:
 
         # Add duplicate warning to Obsidian if duplicate info provided
         if duplicate:
-            self._add_duplicate_warning_to_obsidian(obsidian_path, duplicate)
+            await asyncio.to_thread(
+                self._add_duplicate_warning_to_obsidian, obsidian_path, duplicate
+            )
             
             # Safely extract duplicate info
             existing_thought = duplicate.get("existing_thought", {})
@@ -685,7 +686,8 @@ class ToolHandlers:
             )
 
             # Update Obsidian file
-            obsidian_path = self._update_obsidian_note(
+            obsidian_path = await asyncio.to_thread(
+                self._update_obsidian_note,
                 existing["obsidian_path"], content, metadata
             )
 

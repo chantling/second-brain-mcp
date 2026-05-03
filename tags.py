@@ -94,9 +94,12 @@ class TagManager:
                 if tag.get("embedding"):
                     try:
                         tag_array = np.array(tag["embedding"])
-                        similarity = np.dot(query_array, tag_array) / (
-                            np.linalg.norm(query_array) * np.linalg.norm(tag_array)
-                        )
+                        norm_query = np.linalg.norm(query_array)
+                        norm_tag = np.linalg.norm(tag_array)
+                        if norm_query == 0 or norm_tag == 0:
+                            similarity = 0.0
+                        else:
+                            similarity = np.dot(query_array, tag_array) / (norm_query * norm_tag)
                         tag["similarity"] = float(similarity)
                         scored_tags.append(tag)
                     except (ValueError, TypeError):

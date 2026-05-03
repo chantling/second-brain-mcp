@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import sys
 from pathlib import Path
@@ -180,6 +180,7 @@ class Config:
             cls.RERANK_ENABLED = False
 
         print("[OK] All configuration validated successfully", file=sys.stderr)
+        cls._initialize_blacklists()
 
     @classmethod
     def _parse_list_var(cls, value: str) -> List[str]:
@@ -493,14 +494,3 @@ class Config:
 
         return ""
 
-    print("[OK] All configuration validated successfully", file=sys.stderr)
-
-    # Validate configuration on import
-    @staticmethod
-    def validate():
-        """Validate configuration and initialize blacklists"""
-        if Config._validated:
-            return
-        Config._validated = True
-        # Call _initialize_blacklists to populate IGNORED_PATHS and IGNORED_FILES
-        Config._initialize_blacklists()
