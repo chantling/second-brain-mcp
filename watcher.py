@@ -15,6 +15,7 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 from config import Config
+import threading
 from tag_utils import sync_tags_for_thought
 
 # Module-level observer reference for health monitoring
@@ -155,6 +156,19 @@ def _log(msg: str, level: str = "INFO"):
     # Always print to stderr
     print(log_msg, file=sys.stderr)
 
+def _atomic_write(filepath, content_str, encoding="utf-8"):
+    """Write to temp file then atomically rename to prevent corruption on crash."""
+    from pathlib import Path
+    tmp = Path(filepath).with_suffix(Path(filepath).suffix + ".tmp")
+    try:
+        tmp.write_text(content_str, encoding=encoding)
+        tmp.replace(filepath)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
 
 class ObsidianEventHandler(FileSystemEventHandler):
     """Handle file system events in Obsidian vault"""
@@ -200,6 +214,9 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
         # NEW: Deferred move queue for files that are currently being processed
         self._deferred_move_queue: asyncio.Queue = asyncio.Queue()
+
+        # Lock for thread-safe access to _recent_deletes
+        self._recent_deletes_lock = threading.Lock()
 
         # Initialize processing lock
         if ObsidianEventHandler._processing_lock is None:
@@ -314,34 +331,35 @@ class ObsidianEventHandler(FileSystemEventHandler):
         matching_delete = None
         current_time = time.time()
 
-        for deleted_path, (deleted_filename, deleted_rel_path, delete_time) in list(
-            self._recent_deletes.items()
-        ):
-            time_diff = current_time - delete_time
-            is_filename_match = (
-                deleted_filename == filename
-            )  # Same filename = likely a move
-            is_time_match = (
-                time_diff < 2.0
-            )  # Create must happen within 2 seconds of delete
+        with self._recent_deletes_lock:
+            for deleted_path, (deleted_filename, deleted_rel_path, delete_time) in list(
+                self._recent_deletes.items()
+            ):
+                time_diff = current_time - delete_time
+                is_filename_match = (
+                    deleted_filename == filename
+                )  # Same filename = likely a move
+                is_time_match = (
+                    time_diff < 2.0
+                )  # Create must happen within 2 seconds of delete
 
-            _log(
-                f"[CREATE] Comparing: deleted_file={deleted_filename}, created_file={filename}, filename_match={is_filename_match}, time_diff={time_diff:.2f}s",
-                "CREATE",
-            )
-
-            if is_filename_match and is_time_match:
-                matching_delete = (
-                    deleted_path,
-                    deleted_filename,
-                    deleted_rel_path,
-                    delete_time,
-                )
                 _log(
-                    f"[CREATE] ✓ MOVE DETECTED: {deleted_rel_path} → {rel_path}",
+                    f"[CREATE] Comparing: deleted_file={deleted_filename}, created_file={filename}, filename_match={is_filename_match}, time_diff={time_diff:.2f}s",
                     "CREATE",
                 )
-                break
+
+                if is_filename_match and is_time_match:
+                    matching_delete = (
+                        deleted_path,
+                        deleted_filename,
+                        deleted_rel_path,
+                        delete_time,
+                    )
+                    _log(
+                        f"[CREATE] ✓ MOVE DETECTED: {deleted_rel_path} → {rel_path}",
+                        "CREATE",
+                    )
+                    break
 
         if matching_delete:
             # This is a move! Handle it as a path update instead of a new entry
@@ -350,7 +368,8 @@ class ObsidianEventHandler(FileSystemEventHandler):
             )
 
             # Remove from recent_deletes tracking
-            del self._recent_deletes[deleted_path]
+            with self._recent_deletes_lock:
+                del self._recent_deletes[deleted_path]
 
             if Config.DEBUG:
                 print(
@@ -729,7 +748,9 @@ class ObsidianEventHandler(FileSystemEventHandler):
         stale_threshold = 5  # seconds - wait this long to see if a create follows
 
         stale_paths = []
-        for src_path, (filename, rel_path, timestamp) in self._recent_deletes.items():
+        with self._recent_deletes_lock:
+            items = list(self._recent_deletes.items())
+        for src_path, (filename, rel_path, timestamp) in items:
             if current_time - timestamp > stale_threshold:
                 stale_paths.append(src_path)
 
@@ -756,7 +777,8 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 future.add_done_callback(log_exception)
             except Exception as e:
                 _log(f"[DELETE] Error deleting stale entry: {e}", "DELETE")
-            del self._recent_deletes[src_path]
+            with self._recent_deletes_lock:
+                del self._recent_deletes[src_path]
             if Config.DEBUG:
                 print(
                     f"[WATCHER] Cleaned up stale delete entry: {rel_path}",
@@ -1384,7 +1406,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
                         "CREATE",
                     )
                     # Use a zero vector as fallback
-                    embedding = [0.0] * 1536
+                    embedding = [0.0] * Config.EMBEDDING_DIMENSIONS
                     _log(f"[CREATE] Using zero vector fallback for embedding", "CREATE")
             except Exception as embed_err:
                 _log(
@@ -1395,7 +1417,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
 
                 _log(f"[CREATE] Traceback: {traceback.format_exc()}", "CREATE")
                 # Use a zero vector as fallback
-                embedding = [0.0] * 1536
+                embedding = [0.0] * Config.EMBEDDING_DIMENSIONS
                 _log(f"[CREATE] Using zero vector fallback due to exception", "CREATE")
 
             # Compute file hash
@@ -2066,7 +2088,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 content_after = "\n".join(lines[frontmatter_end_idx + 1 :])
                 new_content = f"---\n{updated_fm}\n---\n\n{content_after}"
 
-        Path(file_path).write_text(new_content, encoding="utf-8")
+        _atomic_write(file_path, new_content)
 
     async def _event_processor(self):
         """Process events from queue (background task)"""
@@ -2194,7 +2216,7 @@ def start_file_watcher(
     if Config.DEBUG:
         print("[WATCHER] Started deferred move processor", file=sys.stderr)
 
-    observer = PollingObserver(timeout=60.0)
+    observer = PollingObserver(timeout=Config.WATCHER_POLL_INTERVAL)
     observer.schedule(event_handler, str(vault_path), recursive=True)
     observer.start()
 

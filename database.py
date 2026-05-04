@@ -179,9 +179,9 @@ class DatabaseManager:
             SELECT
                 id, content, thought_type, topics, people,
                 action_items, obsidian_path, created_at,
-                (embedding <=> '{embedding_str}'::vector(1536)) as similarity
+                (embedding <=> '{embedding_str}'::vector(Config.EMBEDDING_DIMENSIONS)) as similarity
             FROM thoughts
-            ORDER BY embedding <=> '{embedding_str}'::vector(1536)
+            ORDER BY embedding <=> '{embedding_str}'::vector(Config.EMBEDDING_DIMENSIONS)
             LIMIT {limit}
             """
 
@@ -405,7 +405,7 @@ class DatabaseManager:
             "total": len(folders_data),
             "created": 0,
             "updated": 0,
-            "skipped": 0,
+            "cached": 0,
             "errors": [],
         }
 
@@ -434,7 +434,7 @@ class DatabaseManager:
                         folder_info["description"]
                     )
                 else:
-                    stats["skipped"] += 1
+                    stats["cached"] += 1
 
                 folder_data = {
                     "path": path,

@@ -59,9 +59,14 @@ class Config:
     SYNC_FULL_SYNC_INTERVAL = int(
         os.getenv("SYNC_FULL_SYNC_INTERVAL", "3600")
     )  # 1 hour in seconds
-    SYNC_EXCLUDE_PATTERNS = os.getenv(
-        "SYNC_EXCLUDE_PATTERNS", ".obsidian,.trash,.ClineData,!Folder_Embeddings.md"
-    ).split(",")
+    SYNC_EXCLUDE_PATTERNS = [
+        p.strip() for p in os.getenv(
+            "SYNC_EXCLUDE_PATTERNS", ".obsidian,.trash,.ClineData,!Folder_Embeddings.md"
+        ).split(",") if p.strip()
+    ]
+
+    # Watcher Configuration
+    WATCHER_POLL_INTERVAL = int(os.getenv("WATCHER_POLL_INTERVAL", "10"))
 
     # Obsidian Configuration
     SEMANTIC_FOLDER_PLACEMENT = (

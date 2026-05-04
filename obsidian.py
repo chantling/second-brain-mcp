@@ -10,6 +10,18 @@ from config import Config
 from database import transform_metadata_for_database
 from tag_utils import sync_tags_for_thought
 
+def _atomic_write(filepath, content_str, encoding="utf-8"):
+    """Write to temp file then atomically rename to prevent corruption on crash."""
+    tmp = filepath.with_suffix(filepath.suffix + ".tmp")
+    try:
+        tmp.write_text(content_str, encoding=encoding)
+        tmp.replace(filepath)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
 # Debug flag - use Config.DEBUG
 DEBUG = Config.DEBUG
 
@@ -139,9 +151,8 @@ class ObsidianManager:
         # Create frontmatter
         frontmatter = self._create_frontmatter(metadata, confidence)
 
-        # Write file
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"{frontmatter}\n\n{content}")
+        # Write file atomically to prevent corruption on crash
+        _atomic_write(filepath, f"{frontmatter}\n\n{content}")
 
         result = {"path": str(filepath.relative_to(self.vault_path))}
 
@@ -1060,9 +1071,8 @@ class ObsidianManager:
 
             content = "\n".join(lines)
 
-            # Write to file
-            with open(cache_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            # Write to file atomically to prevent corruption on crash
+            _atomic_write(cache_path, content)
 
             if DEBUG:
                 print(
@@ -1702,7 +1712,7 @@ class ObsidianManager:
                 # No frontmatter, add it
                 frontmatter_block = f"---\nsupabase_id: {supabase_id}\n---\n\n"
                 new_content = frontmatter_block + content
-                file_path.write_text(new_content, encoding="utf-8")
+                _atomic_write(file_path, new_content)
                 return
 
             # Find the CLOSING --- of the frontmatter block
@@ -1758,6 +1768,6 @@ class ObsidianManager:
                 content_after_frontmatter
             )
 
-            file_path.write_text(new_content, encoding="utf-8")
+            _atomic_write(file_path, new_content)
         except Exception as e:
             print(f"[ERROR] Failed to update frontmatter: {e}", file=sys.stderr)

@@ -11,7 +11,7 @@ import sys
 import uuid
 import asyncio
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from config import Config
@@ -100,6 +100,7 @@ class SupabaseLock:
 
         except Exception:
             # Fallback: try direct table update if RPC doesn't exist yet
+            # Only acquire if the lock is expired (prevents stealing from active holder)
             try:
                 resp = (
                     self.client.table("server_lock")
@@ -116,6 +117,7 @@ class SupabaseLock:
                         }
                     )
                     .eq("id", 1)
+                    .lt("expires_at", datetime.utcnow().isoformat())
                     .execute()
                 )
                 return bool(resp.data)
@@ -170,21 +172,8 @@ class SupabaseLock:
             print(f"[LOCK] Lock release failed: {e}", file=sys.stderr)
             return False
 
-    async def renew(self, ttl_seconds: int = None) -> bool:
-        """Extend the lock's TTL while we still hold it.
-
-        Called periodically (every LOCK_HEARTBEAT_INTERVAL seconds) while
-        holding the lock to prevent it from expiring during long operations.
-
-        Args:
-            ttl_seconds: New TTL to set (default: LOCK_TTL_SECONDS)
-
-        Returns:
-            True if renewed, False if we no longer hold it
-        """
-        if ttl_seconds is None:
-            ttl_seconds = Config.LOCK_TTL_SECONDS
-
+    def _renew_sync(self, ttl_seconds: int) -> bool:
+        """Synchronous lock renewal."""
         try:
             resp = (
                 self.client.table("server_lock")
@@ -202,6 +191,30 @@ class SupabaseLock:
             return bool(resp.data)
         except Exception as e:
             print(f"[LOCK] Lock renew failed: {e}", file=sys.stderr)
+            return False
+
+    async def renew(self, ttl_seconds: int = None) -> bool:
+        """Extend the lock's TTL while we still hold it.
+
+        Called periodically (every LOCK_HEARTBEAT_INTERVAL seconds) while
+        holding the lock to prevent it from expiring during long operations.
+
+        Args:
+            ttl_seconds: New TTL to set (default: LOCK_TTL_SECONDS)
+
+        Returns:
+            True if renewed, False if we no longer hold it
+        """
+        if ttl_seconds is None:
+            ttl_seconds = Config.LOCK_TTL_SECONDS
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(self._renew_sync, ttl_seconds),
+                timeout=Config.DB_TIMEOUT,
+            )
+            return result
+        except asyncio.TimeoutError:
+            print(f"[LOCK] renew timed out after {Config.DB_TIMEOUT}s", file=sys.stderr)
             return False
 
     async def start_auto_renew(self, ttl_seconds: int = None, interval: int = None):
@@ -306,7 +319,7 @@ class SupabaseLock:
             expires_at = datetime.fromisoformat(
                 row["expires_at"].replace("Z", "+00:00")
             )
-            return expires_at > datetime.utcnow().replace(tzinfo=expires_at.tzinfo)
+            return expires_at > datetime.now(timezone.utc)
 
         except Exception:
             return False

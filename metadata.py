@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import sys
@@ -79,25 +80,29 @@ class MetadataExtractor:
             # Use OpenAI SDK with z.ai endpoint
             logger.info("[METADATA] Calling API for metadata extraction...")
             api_start = datetime.now()
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are a metadata extraction expert. Return only valid JSON."
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a metadata extraction expert. Return only valid JSON."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=1000,
+                    extra_body={
+                        "thinking": {
+                            "type": "disabled"
+                        }
                     }
-                ],
-                temperature=0.1,
-                max_tokens=1000,
-                extra_body={
-                    "thinking": {
-                        "type": "disabled"
-                    }
-                }
+                )
             )
             api_elapsed = (datetime.now() - api_start).total_seconds()
             logger.info(f"[METADATA] API call completed in {api_elapsed:.2f}s")

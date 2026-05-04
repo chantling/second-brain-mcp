@@ -577,6 +577,7 @@ async def main():
                 background_tasks.append(_cleanup_timer_task)
                 background_tasks.append(_heartbeat_task)
                 background_tasks.append(_deferred_move_task)
+                background_tasks.append(_blacklist_watch_task)
 
                 # Initial sync of existing notes (runs in background)
                 if Config.SYNC_INITIAL_SYNC:
@@ -626,7 +627,6 @@ async def main():
         print("\nServer interrupted by user", file=sys.stderr)
     except Exception as e:
         print(f"Server error: {e}", file=sys.stderr)
-        sys.exit(1)
     finally:
         print("[SERVER] Shutdown sequence starting", file=sys.stderr)
 
@@ -686,4 +686,3 @@ if __name__ == "__main__":
         error_msg = f"[ENTRY] Configuration error after {elapsed:.2f}s: {e}"
         print(error_msg, file=sys.stderr)
         logger.error(error_msg)
-        sys.exit(1)
