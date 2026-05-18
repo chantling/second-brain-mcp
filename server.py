@@ -1,8 +1,12 @@
 import asyncio
+import atexit
+import ctypes
 import os
 import random
 import signal
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from mcp.server import Server
@@ -316,28 +320,44 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     logger.info(f"[TOOL] Starting tool call: {name}")
 
     try:
-        # Wrap tool handler with overall timeout (45s to beat MCP Inspector's 60s)
-        result = await asyncio.wait_for(
-            tool_handlers.handle_tool_call(name, arguments),
-            timeout=45.0,
-        )
+        # Wrap tool handler with overall timeout (240s to match documented max duration)
+        tool_task = asyncio.ensure_future(tool_handlers.handle_tool_call(name, arguments))
+        try:
+            result = await asyncio.wait_for(tool_task, timeout=240.0)
+        except asyncio.TimeoutError:
+            # Cancel the underlying task to prevent orphaned operations
+            tool_task.cancel()
+            try:
+                await tool_task
+            except asyncio.CancelledError:
+                pass
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.error(f"[TOOL] Tool call timed out: {name} after {elapsed:.2f}s")
+            return [TextContent(type="text", text=f"Error: Tool call '{name}' timed out after 240s")]
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"[TOOL] Completed tool call: {name} in {elapsed:.2f}s")
 
         # Run orphan cleanup after each tool call (non-blocking, best effort)
         if Config.SYNC_ENABLED:
-            asyncio.ensure_future(_run_orphan_cleanup_after_tool_call())
+            cleanup_task = asyncio.ensure_future(_run_orphan_cleanup_after_tool_call())
+            cleanup_task.add_done_callback(_log_cleanup_error)
 
         return [TextContent(type="text", text=str(result))]
-    except asyncio.TimeoutError:
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.error(f"[TOOL] Tool call timed out: {name} after {elapsed:.2f}s")
-        return [TextContent(type="text", text=f"Error: Tool call '{name}' timed out")]
     except Exception as e:
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.error(f"[TOOL] Tool call failed: {name} after {elapsed:.2f}s - {e}")
         return [TextContent(type="text", text=f"Error: {str(e)}")]
+
+
+def _log_cleanup_error(task):
+    """Log errors from fire-and-forget cleanup tasks."""
+    try:
+        exc = task.exception()
+        if exc:
+            logger.warning(f"Orphan cleanup failed: {exc}")
+    except asyncio.CancelledError:
+        pass
 
 
 async def _periodic_orphan_cleanup_loop(interval: int):
@@ -504,6 +524,33 @@ async def main():
     # Initialize status variables
     background_tasks = []
 
+    # Start parent PID watchdog — kill this process if parent (opencode/dynamic-mcp) dies
+    def _parent_watchdog():
+        """Poll every 5s to check if parent process is still alive."""
+        kernel32 = ctypes.windll.kernel32
+        parent_pid = os.getppid()
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        while True:
+            time.sleep(5)
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, parent_pid)
+            if handle == 0:
+                print("[SERVER] Parent process died, shutting down", file=sys.stderr)
+                os._exit(0)
+            kernel32.CloseHandle(handle)
+
+    watchdog_thread = threading.Thread(target=_parent_watchdog, daemon=True)
+    watchdog_thread.start()
+
+    # Register atexit handler as safety net
+    def _atexit_cleanup():
+        """Ensure cleanup runs on normal exit."""
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+
+    atexit.register(_atexit_cleanup)
+
     # Set up signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         nonlocal shutdown_requested, background_tasks
@@ -668,19 +715,19 @@ if __name__ == "__main__":
     entry_start_time = datetime.now()
     print(f"[ENTRY] Server entry point reached at {entry_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}", file=sys.stderr)
     logger.info(f"[ENTRY] Server entry point reached at {entry_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-    
+
     # Validate configuration before starting
     try:
         print("[ENTRY] Validating configuration...", file=sys.stderr)
         logger.info("[ENTRY] Validating configuration...")
         Config.validate()
-        
+
         print("Starting Second Brain MCP Server...", file=sys.stderr)
         logger.info("[ENTRY] Configuration validated successfully, starting main()...")
-        
+
         # Run the main server
         asyncio.run(main())
-        
+
     except Exception as e:
         elapsed = (datetime.now() - entry_start_time).total_seconds()
         error_msg = f"[ENTRY] Configuration error after {elapsed:.2f}s: {e}"

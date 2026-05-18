@@ -791,6 +791,7 @@ class DatabaseManager:
                     self.client.table("thoughts")
                     .select("id, content, metadata, created_at, obsidian_path")
                     .not_.is_("metadata->>url", "null")
+                    .limit(1)
                 )
 
                 for thought in response.data:
@@ -816,6 +817,7 @@ class DatabaseManager:
                     self.client.table("thoughts")
                     .select("id, content, metadata, created_at, obsidian_path")
                     .not_.is_("metadata->>url", "null")
+                    .limit(1)
                 )
 
                 for thought in response.data:

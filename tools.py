@@ -608,10 +608,11 @@ class ToolHandlers:
         if DEBUG:
             print(f"[DEBUG] _store_new_thought - Stored in Supabase with ID: {supabase_id}", file=sys.stderr)
 
-        # Store in Obsidian
+        # Store in Obsidian (run in thread to avoid blocking event loop)
         logger.info("[STORE] Creating Obsidian note...")
         obsidian_start = datetime.now()
-        obsidian_result = obsidian_manager.create_note(
+        obsidian_result = await asyncio.to_thread(
+            obsidian_manager.create_note,
             content, {**metadata, "supabase_id": supabase_id, "source": source}
         )
         obsidian_elapsed = (datetime.now() - obsidian_start).total_seconds()
