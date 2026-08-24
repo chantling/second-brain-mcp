@@ -69,6 +69,7 @@ jobs:
         run: echo "[COMPLETE] Worker-${{ matrix.node_index }} finished execution cycle."
 
   # هذه المهمة تُستدعى تلقائياً بعد انتهاء جميع الـ 15 سيرفر لتشغيل الدورة التالية
+# هذه المهمة تُستدعى تلقائياً بعد انتهاء جميع الـ 15 سيرفر لتشغيل الدورة التالية
   trigger-next-run:
     needs: launch-workers
     if: always() # لضمان التشغيل حتى لو حدث خطأ في إحدى العقد
@@ -81,5 +82,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo ">>> 15 minutes cycle finished. Triggering next cycle automatically..."
-          gh api -X POST /repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches \
-            -f ref="${{ github.ref }}"
+          gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
