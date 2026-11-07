@@ -1086,6 +1086,15 @@ During this work, 45 stale MCP processes from dead stacks (financialcalc 18, log
 6. Update branch: changed `Books` description to a sentinel, ran the sync; `updated=1`, description repaired and restored **exactly**. A legacy row (`--Attachments--`, not in the current vault) touched during the test was restored exactly (75 bytes).
 7. A failed batch read aborts the sync (no writes) instead of inserting duplicates.
 
-### Operational note
+### Live verification (2026-11-07, 3:47 PM restart)
 
-The live stacks (2:44 and 3:02 dmcp) still run the pre-fix code; these changes load on the next MCP restart. The active cache is now valid until 2026-11-14 unless a restart rewrites it.
+The 3:47 PM OpenChamber restart loaded `ccaad7f` and consolidated to a single dmcp/second-brain stack. The startup log shows:
+
+- one `folders?select=path,folder_name,full_path_hierarchy,description&limit=1000` query;
+- **0** `folders?select=*`, **0** `PATCH /folders`, **0** `select=path,embedding` fetches;
+- 4 thoughts snapshot pages (initial sync + startup cleanup) and one lock acquire/release;
+- cache rewritten with 289 entries at 3:48:02 PM.
+
+Startup folder egress fell from ~8.7 MB to ~0.1 MB, and the folder phase completed in ~1 s. A test note created after the restart (id 18287, `!To-Sort!\MCP Test Note zqx-unicorn-7731-valkyrie.md`) was stored by the watcher and found by a search from another session.
+
+The active cache is valid until 2026-11-14 unless a restart rewrites it.

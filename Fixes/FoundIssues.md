@@ -1029,3 +1029,5 @@ This was **not** what blocks DMCP initialization: a direct stdio probe measured 
 **Status: FIXED 2026-11-07.** `sync_folders` now fetches `path, folder_name, full_path_hierarchy, description` once (paginated, no embedding), compares, and writes only created/changed rows. Missing-folder fetches are per-path (PostgREST `in.()` breaks on folder names containing commas/parentheses) with a bulk fallback only when the cache is invalid or more than 20 folders are missing.
 
 **Result:** real-vault sync **~1.0 s** (was ~55 s), **0 created / 0 updated / 160 skipped**, no bulk fetch; a simulated new folder fetched **1** embedding instead of 289.
+
+**Live verification 2026-11-07 3:47 PM:** after the restart, startup issued **one** lightweight folder query, **0** `folders?select=*`, **0** PATCHes and **0** embedding fetches. A note created afterward (id 18287) was stored and searchable from another session.
