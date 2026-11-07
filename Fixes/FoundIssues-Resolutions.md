@@ -1030,3 +1030,32 @@ The 88 rows created by the audit were backed up (thoughts + 96 `thought_tags` ro
 - `%TEMP%\opencode\orphan_cleanup_dryrun_2026-11-07.csv` (reviewed deletion list)
 
 **Rollback:** revert the commit; restore rows from the JSON backups if needed. Note the cleanup deleted rows that `delete_thought_by_id` had already removed from `links`/`thought_tags`; those are included in the backup.
+
+---
+
+## Startup sync snapshot + startup delay + cleanup throttle (2026-11-07)
+
+**Issues addressed:** E11, E12 (FoundIssues.md). Also part of the DMCP startup investigation.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `obsidian.py` | `sync_existing_notes_to_supabase()` loads `get_all_thoughts()` once (2 paginated queries) into `existing_ids` / `path_to_id`; replaces per-note `thought_exists()` and `get_thought_by_obsidian_path()` calls. New inserts update the in-memory maps. |
+| `obsidian.py` | Per-note "valid supabase_id" print moved behind `Config.DEBUG`. |
+| `config.py` | New `STARTUP_BACKGROUND_DELAY` (default 10 s) and `ORPHAN_CLEANUP_MIN_INTERVAL` (default 300 s), both env-overridable. |
+| `server.py` | Initial sync and folder sync wait `STARTUP_BACKGROUND_DELAY` before starting; post-tool-call orphan cleanup is throttled to `ORPHAN_CLEANUP_MIN_INTERVAL`. |
+
+The per-insert lock + final path re-check from the previous change is unchanged, so a stale snapshot cannot create duplicates.
+
+### Tests (2026-11-07)
+
+1. `py_compile` on config.py, obsidian.py, server.py, database.py, watcher.py - OK.
+2. Config values load: `STARTUP_BACKGROUND_DELAY = 10.0`, `ORPHAN_CLEANUP_MIN_INTERVAL = 300`.
+3. Full startup sync against the real vault: **`0 synced, 3701 skipped, 0 errors` in 6.2 s**; log had 12 lines; rows 1,628; duplicate groups 0.
+4. Cleanup throttle: first `_run_orphan_cleanup_after_tool_call()` = 5.63 s ("No orphaned entries found"), immediate second call = 0.001 s (throttled).
+5. MCP init probe (before delay): initialize response 5.3-6.2 s both with and without sync.
+
+### Operational note
+
+During this work, 45 stale MCP processes from dead stacks (financialcalc 18, logstrip 17, symdex 8, youtube 2; ~1 GB) were terminated. The kill list contained no second-brain processes. Separately, the dynamic-mcp stack disappeared and the MCP tool catalog dropped dynamic-mcp; second-brain was not running at the end of this session. Restart the MCP stack/OpenChamber to load these changes.

@@ -989,3 +989,23 @@ Found on the two notes that could not be re-imported after cleanup: `Resources\H
 **Impact:** The affected notes can never be imported/updated; each startup retries, burns embedding calls and fails again. Silent because the sync only logs an error count.
 
 **Status: FIXED 2026-11-07.** New `_json_safe()` helper recursively converts date/datetime (and other non-JSON values) to ISO strings; applied to the payloads of `store_thought`, `update_thought` and `update_thought_content`. Re-ran the startup sync: `2 synced, 3699 skipped, 0 errors`; the notes received ids 18285 and 18286.
+
+### E11. Startup sync made one HTTP request per note and flooded stderr (measured 2026-11-07)
+
+**File:** `obsidian.py` (`sync_existing_notes_to_supabase`), `server.py`
+
+**Details:** After E1b, each startup pass still issued one `thought_exists()` request per note - **1,628 requests at ~145 ms each (~4 minutes)** - and printed one `[SYNC] Note has valid supabase_id ..., skipping` line per note (~1,650 stderr lines).
+
+This was **not** what blocks DMCP initialization: a direct stdio probe measured the MCP `initialize` response at **5.3-6.2 s both with and without the initial sync**, because the stdio server starts before the background sync. But the request storm and stderr flood made startup heavy and were the dominant cost of the sync pass.
+
+**Status: FIXED 2026-11-07.** One paginated snapshot of `id, obsidian_path` (2 queries) is now loaded into in-memory sets before the loop; per-note success printing is behind `Config.DEBUG`; initial and folder syncs wait `STARTUP_BACKGROUND_DELAY_SECONDS` (default 10 s) so `initialize`/`tools/list` always win the startup race.
+
+**Result:** `0 synced, 3701 skipped, 0 errors` in **6.2 s** and 12 log lines (was ~242 s and ~1,650 lines). Rows 1,628, duplicate groups 0.
+
+### E12. Post-tool-call orphan cleanup ran after every tool call (measured 2026-11-07)
+
+**File:** `server.py` (`_run_orphan_cleanup_after_tool_call`)
+
+**Details:** Every MCP tool call scheduled a full orphan cleanup: two paginated queries plus a synchronous scan of all 3,701 vault files, holding the global `server_lock` for ~5.6 s. Any note edit during that window failed to acquire `modify_update` and had its update **skipped**.
+
+**Status: FIXED 2026-11-07.** Throttled by `ORPHAN_CLEANUP_MIN_INTERVAL_SECONDS` (default 300 s). Startup cleanup and the 10-minute periodic loop are unchanged. Measured: first call 5.63 s, immediate second call 0.001 s.

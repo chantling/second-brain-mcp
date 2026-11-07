@@ -69,6 +69,17 @@ class Config:
     # Watcher Configuration
     WATCHER_POLL_INTERVAL = int(os.getenv("WATCHER_POLL_INTERVAL", "10"))
 
+    # Startup tuning: let the MCP initialize/tools-list handshake complete
+    # before background syncs start competing for the event loop.
+    STARTUP_BACKGROUND_DELAY = float(
+        os.getenv("STARTUP_BACKGROUND_DELAY_SECONDS", "10")
+    )
+    # Minimum interval between post-tool-call orphan cleanups (each one scans
+    # the whole vault and holds the distributed lock for several seconds).
+    ORPHAN_CLEANUP_MIN_INTERVAL = int(
+        os.getenv("ORPHAN_CLEANUP_MIN_INTERVAL_SECONDS", "300")
+    )
+
     # Obsidian Configuration
     SEMANTIC_FOLDER_PLACEMENT = (
         os.getenv("SEMANTIC_FOLDER_PLACEMENT", "false").lower() == "true"

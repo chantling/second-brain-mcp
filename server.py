@@ -27,6 +27,7 @@ _heartbeat_task = None
 _orphan_cleanup_enabled = False
 _initial_sync_complete = False
 _initial_sync_running = False
+_last_tool_cleanup_at = 0.0
 
 
 # Helper function for debug logging
@@ -393,11 +394,20 @@ async def _run_orphan_cleanup_after_tool_call():
 
     Waits for initial sync to complete before running to prevent race condition
     where orphan cleanup deletes entries that haven't been synced yet.
+
+    Throttled: each run scans the whole vault and holds the distributed lock for
+    several seconds, so at most one run per ORPHAN_CLEANUP_MIN_INTERVAL.
     """
+    global _last_tool_cleanup_at
     try:
         # Wait for orphan cleanup to be enabled (initial sync must complete first)
         if not _orphan_cleanup_enabled:
             return
+
+        now = time.monotonic()
+        if now - _last_tool_cleanup_at < Config.ORPHAN_CLEANUP_MIN_INTERVAL:
+            return
+        _last_tool_cleanup_at = now
 
         from obsidian import ObsidianManager
         import tools
@@ -432,6 +442,8 @@ async def _run_warmup_background():
 async def _run_folder_sync_startup():
     """Run folder sync on server startup (non-blocking background task)"""
     try:
+        # Let the MCP initialize/tools-list handshake finish first.
+        await asyncio.sleep(Config.STARTUP_BACKGROUND_DELAY)
         print("[SYNC] Starting folder sync on startup...", file=sys.stderr)
         await tool_handlers._sync_folders()
         print("[SYNC] Folder sync completed on startup", file=sys.stderr)
@@ -487,6 +499,9 @@ async def _run_initial_sync():
     try:
         _initial_sync_running = True
         debug_log("[SYNC] Starting initial sync in background...")
+
+        # Let the MCP initialize/tools-list handshake finish first.
+        await asyncio.sleep(Config.STARTUP_BACKGROUND_DELAY)
 
         from obsidian import ObsidianManager
         import tools

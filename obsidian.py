@@ -1410,6 +1410,16 @@ class ObsidianManager:
         # Collect all markdown files in vault
         markdown_files = list(self.vault_path.rglob("*.md"))
 
+        # Snapshot existing rows once (two paginated queries) instead of one
+        # existence request per note (~1,600 requests / ~4 minutes at startup).
+        existing_ids = set()
+        path_to_id = {}
+        if self.db_manager:
+            for row in await self.db_manager.get_all_thoughts():
+                existing_ids.add(str(row.get("id")))
+                if row.get("obsidian_path"):
+                    path_to_id[row["obsidian_path"]] = row.get("id")
+
         synced_count = 0
         skipped_count = 0
         error_count = 0
@@ -1436,52 +1446,38 @@ class ObsidianManager:
                 metadata = self._extract_frontmatter(content, file_rel_path)
 
                 # Check if note has a supabase_id in frontmatter
-                # If so, verify it still exists in database
+                # If so, verify it still exists in database (from the snapshot)
                 if metadata and metadata.get("supabase_id"):
                     supabase_id = metadata.get("supabase_id")
-                    try:
-                        # Cheap existence check (id only); full row is not needed here
-                        existing_entry = await self.db_manager.thought_exists(
-                            supabase_id
-                        )
-
-                        if existing_entry:
-                            # Entry still exists and matches frontmatter - skip
-                            # If note was moved, orphan cleanup will handle updating the path
-                            # If note needs re-syncing (content changed), we'll handle that separately
+                    if str(supabase_id) in existing_ids:
+                        # Entry still exists and matches frontmatter - skip
+                        # If note was moved, orphan cleanup will handle updating the path
+                        # If note needs re-syncing (content changed), we'll handle that separately
+                        if Config.DEBUG:
                             print(
                                 f"[SYNC] Note has valid supabase_id {supabase_id}, skipping",
                                 file=sys.stderr,
                             )
-                            skipped_count += 1
-                            continue
-                        else:
-                            # Entry doesn't exist (was deleted) - proceed with creating new entry
-                            print(
-                                f"[SYNC] Note has deleted supabase_id {supabase_id}, re-syncing...",
-                                file=sys.stderr,
-                            )
-                    except Exception as e:
-                        # Error checking entry - proceed with creating new entry
-                        print(
-                            f"[SYNC] Error checking supabase_id {supabase_id}: {e}, re-syncing...",
-                            file=sys.stderr,
-                        )
+                        skipped_count += 1
+                        continue
+                    # Entry doesn't exist (was deleted) - proceed with creating new entry
+                    print(
+                        f"[SYNC] Note has deleted supabase_id {supabase_id}, re-syncing...",
+                        file=sys.stderr,
+                    )
 
                 # Check if already in Supabase by path (but no frontmatter)
                 # This handles case where DB entry exists but file doesn't have frontmatter
                 if self.db_manager:
-                    existing = await self.db_manager.get_thought_by_obsidian_path(
-                        rel_path
-                    )
-                    if existing and existing.get("id"):
+                    existing_id = path_to_id.get(rel_path)
+                    if existing_id:
                         # Entry exists but file doesn't have frontmatter
                         # Update frontmatter with existing database ID
                         print(
-                            f"[SYNC] Found DB entry (ID: {existing.get('id')}) but no frontmatter, updating...",
+                            f"[SYNC] Found DB entry (ID: {existing_id}) but no frontmatter, updating...",
                             file=sys.stderr,
                         )
-                        self._update_frontmatter(md_file, existing.get("id"))
+                        self._update_frontmatter(md_file, existing_id)
                         skipped_count += 1
                         continue
 
@@ -1550,6 +1546,11 @@ class ObsidianManager:
                 finally:
                     if self._lock:
                         await self._lock.release()
+
+                # Keep the in-memory snapshot current for the rest of this pass
+                existing_ids.add(str(supabase_id))
+                path_to_id[rel_path] = supabase_id
+
                 if Config.DEBUG:
                     print(
                         f"[SYNC] Stored with supabase_id={supabase_id}",
