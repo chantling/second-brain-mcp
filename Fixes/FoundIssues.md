@@ -832,7 +832,7 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 **File:** `obsidian.py` / `database.py`
 **Lines:** `obsidian.py:1444` and `obsidian.py:1472` (callers); `database.py:251` (`get_thought`) and `database.py:599` (`get_thought_by_obsidian_path`)
 
-**Details:** `sync_existing_notes_to_supabase()` runs on every server startup and, for each markdown file in the vault (~17k notes), calls `get_thought()` or `get_thought_by_obsidian_path()`. Both use `select("*")`, which includes the `embedding` column (vector(1536) ~ 10-30KB JSON per row). Neither caller reads the embedding — they check existence, `id`, `obsidian_path`, and `file_hash` only. One startup pass = ~17k rows x ~2 fetches x ~15KB = roughly 300-500MB of egress. Confirmed in Supabase API logs (2026-11-07): ~700 `GET /rest/v1/thoughts?select=*&id=eq.X` requests in a 100-second burst from `python-httpx/0.28.1` (this server), bracketed by `acquire_lock`/`PATCH server_lock`.
+**Details:** `sync_existing_notes_to_supabase()` runs on every server startup and, for each markdown file in the vault (~17k notes), calls `get_thought()` or `get_thought_by_obsidian_path()`. Both use `select("*")`, which includes the `embedding` column (vector(1536) ~ 10-30KB JSON per row). Neither caller reads the embedding ï¿½ they check existence, `id`, `obsidian_path`, and `file_hash` only. One startup pass = ~17k rows x ~2 fetches x ~15KB = roughly 300-500MB of egress. Confirmed in Supabase API logs (2026-11-07): ~700 `GET /rest/v1/thoughts?select=*&id=eq.X` requests in a 100-second burst from `python-httpx/0.28.1` (this server), bracketed by `acquire_lock`/`PATCH server_lock`.
 
 **Impact:** This is the sole cause of the egress overage. Server restarts (each MCP session start) re-download the entire table's embedding column. Also slows startup by ~100 seconds.
 
@@ -843,11 +843,11 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 **File:** `watcher.py`
 **Lines:** 1334 and 1353
 
-**Details:** `get_thought_by_obsidian_path(obsidian_path)` is called twice back-to-back with identical arguments; both blocks return if found. (Already documented as L7 in FoundIssues-Resolutions.md, but never applied — and with E1 unfixed it doubled the per-startup egress.)
+**Details:** `get_thought_by_obsidian_path(obsidian_path)` is called twice back-to-back with identical arguments; both blocks return if found. (Already documented as L7 in FoundIssues-Resolutions.md, but never applied ï¿½ and with E1 unfixed it doubled the per-startup egress.)
 
 **Impact:** Doubled request volume and egress for every created file. After E1 is fixed the cost is negligible.
 
-**Fix approach:** Optionally delete the second block (L7). DECISION 2026-11-07: intentionally NOT removed — it narrows a real race window (concurrent create) and costs ~nothing once selects are skinny. Left in place.
+**Fix approach:** Optionally delete the second block (L7). DECISION 2026-11-07: intentionally NOT removed ï¿½ it narrows a real race window (concurrent create) and costs ~nothing once selects are skinny. Left in place.
 
 ### E3. `links.py` `find_related_notes` uses `select("*")`
 
@@ -865,11 +865,11 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 **File:** `database.py`
 **Lines:** 790-795 and 816-821
 
-**Details:** Tier 2 and Tier 3 fetch `.not_.is_("metadata->>url", "null").limit(1)` — a single arbitrary row — then compare client-side against the new note's URL. A duplicate can only be found if it happens to be that one row. The filter does not constrain by URL at all.
+**Details:** Tier 2 and Tier 3 fetch `.not_.is_("metadata->>url", "null").limit(1)` ï¿½ a single arbitrary row ï¿½ then compare client-side against the new note's URL. A duplicate can only be found if it happens to be that one row. The filter does not constrain by URL at all.
 
 **Impact:** URL-based duplicate detection is effectively non-functional; duplicates by URL are only caught by luck (video_id tier still works).
 
-**Fix approach (future):** Filter server-side, e.g. `.eq("metadata->>url", normalized_url)` (Tier 3 may need the heuristic variants too). Not changed in this pass to keep the diff minimal — column-list-only changes.
+**Fix approach (future):** Filter server-side, e.g. `.eq("metadata->>url", normalized_url)` (Tier 3 may need the heuristic variants too). Not changed in this pass to keep the diff minimal ï¿½ column-list-only changes.
 
 ### Verification notes (2026-11-07)
 
@@ -897,7 +897,7 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 
 **File:** `database.py`, `obsidian.py`, `watcher.py`
 
-**Details:** After E1, live measurement showed the new select averaged **8.1KB/row vs 32.1KB/row** before — a **74.6% reduction**, not the projected 95-97%. Reason: embedding was ~24KB of a 32KB row, but content (6.3KB) + metadata (0.85KB) dominate the remainder. Startup sync and path lookups do not need content/metadata at all:
+**Details:** After E1, live measurement showed the new select averaged **8.1KB/row vs 32.1KB/row** before ï¿½ a **74.6% reduction**, not the projected 95-97%. Reason: embedding was ~24KB of a 32KB row, but content (6.3KB) + metadata (0.85KB) dominate the remainder. Startup sync and path lookups do not need content/metadata at all:
 
 - existence checks (startup sync, watcher create) only need `id` (~0.03KB)
 - watcher modify and path lookup only need `id, obsidian_path, file_hash` (~0.18KB)
@@ -906,12 +906,68 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 
 **Fix approach:** dedicated lightweight methods `thought_exists()` and `get_thought_sync_state()`; `get_thought_by_obsidian_path()` reduced to `id, obsidian_path, file_hash`. `get_thought()` kept full (minus embedding) because the MCP `get_thought` tool and the link graph need content. Implemented same day - see Resolutions.
 
-### E6. Multiple concurrent second-brain server instances each run the startup/hourly sync (observed 2026-11-07)
+### E6. Transient duplicate MCP stacks (observed 2026-11-07; corrected later same day)
 
-**File:** MCP client configuration (outside the repo)
+**File:** MCP client / `dmcp.exe` lifecycle (outside this repo)
 
-**Details:** While auditing, four `server.py` processes were running simultaneously (two started 10:30:58, two at 10:50:25) - each MCP client connection spawns its own server process. Every instance performs the startup vault sync and the hourly full sync/orphan cleanup independently. Egress and Supabase request volume therefore multiply by the number of live instances (x4 in the observed case). Concurrent instances can also race on orphan cleanup: the `thoughts` row count dropped 2124 -> 2035 while these audits ran, with orphan deletions being applied by a running instance.
+**Correction:** The earlier report of "four `server.py` instances" was a miscount. Each instance is **two OS processes**: `venv\Scripts\python.exe` is a uv trampoline (268 KB launcher) that re-executes the base interpreter (103 KB `python.exe`). So four processes = **two server instances**, not four.
 
-**Impact:** Multiplies sync egress and request volume; orphan cleanup races can delete rows another instance is mid-way through verifying.
+**Details:**
+- Two `dmcp.exe` parents existed at the time (created 10:30:57 and 10:50:25), each spawning the complete MCP set (youtube, pymupdf, financialcalc, symdex, second-brain), not just this server.
+- The 10:50 stack exited later; only the 10:30 instance remains (PID 30040 trampoline -> 8680 interpreter). `dynamic-mcp.json` has exactly one `second-brain` entry, so this was not double registration - it was a second MCP host/dmcp process.
+- Since the 10:30 and 10:50 stacks overlapped, both ran the startup sync. The startup sync deliberately takes **no distributed lock** ("no lock needed since this is the first operation", `obsidian.py` ~1393), so overlapping instances import the same notes concurrently.
+- Separately, dmcp/OpenChamber leaks MCP children across restarts on this machine: orphaned Nov 4-6 processes for financialcalc, pymupdf, youtube and symdex are still alive with dead parents. No old second-brain orphan was alive at the time of the audit.
 
-**Fix approach (future):** ensure only one second-brain server instance is registered in the MCP client config, or gate the startup sync behind the existing distributed lock (it currently starts before acquiring a lock) / an env flag.
+**Impact:** During any overlap, egress/request volume doubles and concurrent startup syncs can create duplicates (see E9). Orphan cleanup is lock-protected; the startup sync is not.
+
+**Fix approach (future):** gate the startup sync behind the existing `SupabaseLock` (already used for orphan cleanup and modify updates) instead of assuming it is the first operation; optionally add a single-instance guard. Keep one MCP host connection per client if dmcp can be configured that way.
+
+### E7. Blacklist is only initialized by `Config.validate()`, so standalone entry points import blacklisted notes (2026-11-07)
+
+**File:** `config.py`, `manual_sync.py` (and any ad-hoc script)
+
+**Details:** `Config._blacklist_patterns` is empty at import time. Patterns load only from `Config.validate()` (`config.py:188`) or `Config.reload_blacklist_if_changed()` (called solely by the watcher's 30-second loop, `watcher.py:2154`).
+
+- The server calls `Config.validate()` at `server.py:723` before `main()`, so the **server itself is correct**. With the blacklist active, **2,073 of 3,701** vault notes are skipped and **all 1,628** non-blacklisted notes carry `supabase_id` -> **0 genuinely unsynced notes**.
+- `manual_sync.py` never calls `Config.validate()` and therefore runs with an empty blacklist. Any script that imports `Config`/`ObsidianManager` directly has the same problem.
+- Evidence: 88 rows for `!Ticker-Analyses!` were created **15:59:45-16:09:20 on 2026-11-07** by a 10-minute manual sync run during the audit. Zero `!Ticker-Analyses!`, `.trash` or `!To-Do!` rows exist with older timestamps, confirming the server has never imported them.
+- Ramification: the earlier "840 unsynced notes" figure was a measurement artifact of this same initialization gap, not a startup-sync failure.
+
+**Fix approach:** lazy-initialize in `is_blacklisted()` (e.g. `if not patterns and _blacklist_mtime is None: _initialize_blacklists()`), and/or call `Config.validate()` explicitly in `manual_sync.py`. Remove the 88 rows created during the audit (they are outside the cleanup window, see E8).
+
+### E8. `get_all_thoughts()` is not paginated, so orphan cleanup only inspects the oldest 1,000 of ~2,000 rows (2026-11-07)
+
+**File:** `database.py` (`get_all_thoughts`, ~line 690), `obsidian.py` (`_do_remove_orphaned_supabase_entries`)
+
+**Details:** The query is `select("id, obsidian_path")` with no `.range()`. PostgREST's max-rows is 1,000, so it returns exactly ids **8334-18047** (oldest 1,000 rows). Measured: **1,004 rows are never returned**.
+
+Consequences:
+- `remove_orphaned_supabase_entries()` never sees the newest half of the table. **73 of 91 duplicate-path groups are entirely invisible** to cleanup; 18 are partially visible.
+- 231 rows point at paths that no longer exist (`John` 107, `Obsidian` 75, `!To-Sort!` 47, `Resources` 1, `Untitled.md` 1) and are never evaluated.
+- The 88 `!Ticker-Analyses!` rows created during the audit (ids 18268+) are outside the window and will not be auto-deleted until this is fixed.
+- The function is also what answers "No Supabase entries to verify" / "No orphaned entries found", so it silently reports success after checking half the table.
+
+**Fix approach:** paginate with `.order("id").range(offset, offset+page-1)` until a short page; run a dry-run listing of would-be deletions before enabling destructive cleanup.
+
+### E9. 91 `obsidian_path` values have multiple rows (investigated 2026-11-07)
+
+**Details:** `thoughts.obsidian_path` is the vault-relative file path (e.g. `Resources\Recipes\Chickpea Bread (My Changes).md`) linking a DB row to its note. The reverse link is the `supabase_id` in the note's YAML frontmatter.
+
+- Table: 2,004 rows; **91 paths have 2-3 rows** (97 extra rows); none are soft-deleted.
+- Against current file content:
+  - **60** groups: file changed since both rows were written (different hash/length) -> note edited/replaced and re-imported as a new row instead of updating the old one.
+  - **29** groups: file no longer exists -> stale rows left behind.
+  - **1** group: one row matches the file, the other is stale.
+  - **1** group: two rows with identical hash (true double import).
+  - **62** of 91: the note's current `supabase_id` matches exactly one row, so the others are orphans.
+- Sources: 28 groups watcher+watcher (`obsidian`), 14 import+import (`obsidian_import`), 4 YouTube-tool + vault import, rest mixed.
+
+**Why it happens:**
+1. No uniqueness at the DB level: `obsidian_path` has a plain index (`CreateDatabase.sql:178`), not `UNIQUE`.
+2. Every writer does check-then-insert (`obsidian.py:1474` -> `1523`; `watcher.py:1334`/`1353` -> insert; modify can fall back to recreate). The window includes AI metadata + embedding calls (seconds), and the lookups swallow errors and return `None`, so a transient 400 (E5) or replication delay makes the code believe no row exists.
+3. Overlapping instances (E6) or watcher + startup sync widen the race; the startup sync takes no lock.
+4. Cleanup that would remove mismatched duplicates only sees the oldest 1,000 rows (E8), so they persist.
+
+**Impact:** Every sync/lookup can pick an arbitrary row from a duplicate group; updates may land on one row while another stays stale; egress and orphan risk grow.
+
+**Fix approach (future):** (a) fix pagination (E8); (b) one-off reconciliation keeping the row whose id matches the note frontmatter (else the one whose hash matches the current file, else newest) and deleting the rest via `delete_thought_by_id`; (c) then add a `UNIQUE` index on `obsidian_path` (or change inserts to upsert) so races fail instead of duplicating.

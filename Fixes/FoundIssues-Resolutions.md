@@ -941,6 +941,6 @@ Startup sync payload: ~8 KB/row -> ~0.03-0.18 KB/row, i.e. a ~1,000-2,000 lookup
 
 ### Note discovered during testing
 
-Four `server.py` instances were running concurrently (see E6). Each runs the startup and hourly syncs, so real-world egress scales with the number of live instances. Recommend consolidating to one instance.
+**Correction (2026-11-07, later):** this was a miscount. Four OS processes were **two** server instances - `venv\Scripts\python.exe` is a uv trampoline that re-executes the base interpreter, so every instance is two processes. A second `dmcp.exe` stack existed transiently from 10:50 and exited later. The startup sync takes no distributed lock, so overlapping instances can import the same notes concurrently. See corrected E6 in FoundIssues.md.
 
 **Rollback:** single commit; only column lists and two added methods plus three call-site swaps.
