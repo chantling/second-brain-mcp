@@ -892,3 +892,26 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 **Impact:** Transient tool failures (returns `None` instead of the note) and skipped sync operations during startup; silent because `isError` stays false.
 
 **Fix approach (future):** Add one bounded retry with backoff for 400/5xx HTML responses at the `_async_execute` level; consider disabling HTTP/2 or reusing a single client with connection limits. NOT changed in this pass (out of scope; would be a behavior change in the most fragile area).
+
+### E1b. Follow-up: sync paths still downloaded 8KB/row after E1 (measured 2026-11-07)
+
+**File:** `database.py`, `obsidian.py`, `watcher.py`
+
+**Details:** After E1, live measurement showed the new select averaged **8.1KB/row vs 32.1KB/row** before — a **74.6% reduction**, not the projected 95-97%. Reason: embedding was ~24KB of a 32KB row, but content (6.3KB) + metadata (0.85KB) dominate the remainder. Startup sync and path lookups do not need content/metadata at all:
+
+- existence checks (startup sync, watcher create) only need `id` (~0.03KB)
+- watcher modify and path lookup only need `id, obsidian_path, file_hash` (~0.18KB)
+
+**Impact (before follow-up):** a ~1,000-2,000 lookup startup pass still transferred ~8-16MB per pass, multiplied by however many server instances run (see E6).
+
+**Fix approach:** dedicated lightweight methods `thought_exists()` and `get_thought_sync_state()`; `get_thought_by_obsidian_path()` reduced to `id, obsidian_path, file_hash`. `get_thought()` kept full (minus embedding) because the MCP `get_thought` tool and the link graph need content. Implemented same day - see Resolutions.
+
+### E6. Multiple concurrent second-brain server instances each run the startup/hourly sync (observed 2026-11-07)
+
+**File:** MCP client configuration (outside the repo)
+
+**Details:** While auditing, four `server.py` processes were running simultaneously (two started 10:30:58, two at 10:50:25) - each MCP client connection spawns its own server process. Every instance performs the startup vault sync and the hourly full sync/orphan cleanup independently. Egress and Supabase request volume therefore multiply by the number of live instances (x4 in the observed case). Concurrent instances can also race on orphan cleanup: the `thoughts` row count dropped 2124 -> 2035 while these audits ran, with orphan deletions being applied by a running instance.
+
+**Impact:** Multiplies sync egress and request volume; orphan cleanup races can delete rows another instance is mid-way through verifying.
+
+**Fix approach (future):** ensure only one second-brain server instance is registered in the MCP client config, or gate the startup sync behind the existing distributed lock (it currently starts before acquiring a lock) / an env flag.

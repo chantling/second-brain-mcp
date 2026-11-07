@@ -1306,7 +1306,7 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 )
                 db_manager = LazyImport.get_db_manager()
                 try:
-                    existing = await db_manager.get_thought(supabase_id)
+                    existing = await db_manager.thought_exists(supabase_id)
                     if existing:
                         _log(
                             f"[CREATE] SKIP: Entry already synced with ID {supabase_id}",
@@ -1554,8 +1554,8 @@ class ObsidianEventHandler(FileSystemEventHandler):
                 db_manager = LazyImport.get_db_manager()
                 _log(f"[DEBUG] _handle_modify 02", "MODIFY")
                 try:
-                    # Try to get the entry with this supabase_id
-                    entry_by_id = await db_manager.get_thought(supabase_id)
+                    # Lightweight lookup: only id, obsidian_path, file_hash are used
+                    entry_by_id = await db_manager.get_thought_sync_state(supabase_id)
 
                     if entry_by_id:
                         # Entry exists with this supabase_id - verify it matches by path

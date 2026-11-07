@@ -901,3 +901,46 @@ Queried the LIVE `thoughts` table with the exact explicit column list before edi
 **Expected outcome:** startup/watcher egress drops from ~400MB to ~5-15MB per pass (~95-97% reduction); daily egress should return to the previous 0-30MB baseline. Startup should also be faster.
 
 **Rollback:** single commit touching only three `select(...)` calls; `git revert` is sufficient.
+
+---
+
+## Supabase Egress - Follow-up: skin-deep sync queries (2026-11-07, later same day)
+
+**Issues addressed:** E1b (from FoundIssues.md)
+
+### Measured baseline after the first fix
+
+- Old `select("*")`: 32.1 KB/row (embedding ~24 KB of it)
+- First fix (all columns except embedding): 8.1 KB/row -> **74.6% reduction only**
+- Composition: content 6.33 KB + metadata 0.85 KB + rest ~0.9 KB
+
+### Changes made
+
+| File | Change |
+|------|--------|
+| `database.py` | Added `thought_exists()` -> `select("id")` (~0.03 KB/row) |
+| `database.py` | Added `get_thought_sync_state()` -> `select("id, obsidian_path, file_hash")` (~0.18 KB/row) |
+| `database.py` | `get_thought_by_obsidian_path()` -> `select("id, obsidian_path, file_hash")` (all callers use only these) |
+| `obsidian.py` | Startup sync existence check now calls `thought_exists()` instead of `get_thought()` |
+| `watcher.py` | `_handle_create` existence check -> `thought_exists()`; `_handle_modify` -> `get_thought_sync_state()` |
+
+`get_thought()` deliberately left unchanged (minus embedding): the MCP `get_thought` tool and `links.get_link_graph()` need content/metadata.
+
+Semantics preserved: `thought_exists()` returns `False` on error, exactly matching the previous behavior where `get_thought()` swallowed exceptions and returned `None` (callers then proceeded to create). No control flow changed.
+
+### Expected outcome
+
+Startup sync payload: ~8 KB/row -> ~0.03-0.18 KB/row, i.e. a ~1,000-2,000 lookup pass drops from ~8-16 MB to **~0.1-0.3 MB** (roughly 99% below the original `select("*")`). Remaining startup egress is the initial `select=id,obsidian_path` index plus folder metadata (unchanged, already cheap).
+
+### Testing performed (2026-11-07)
+
+1. `py_compile` on database.py, obsidian.py, watcher.py, links.py, tools.py - OK.
+2. Direct DB tests: `thought_exists(real_id)=True`, `thought_exists(999999999)=False`; `get_thought_sync_state()` returns exactly `{id, obsidian_path, file_hash}` (0.18 KB); `get_thought_by_obsidian_path()` returns exactly the same 3 keys; `get_thought()` still returns 14 keys including content, no embedding.
+3. Controlled startup-sync test: temporary 2-file vault whose notes reference real existing ids -> output `0 synced, 2 skipped, 0 errors`; no new rows and no rows for the temp file names (verified by query). A second 1-file run likewise gave `0 synced, 1 skipped, 0 errors`.
+4. MCP end-to-end: server boots, `get_thought` tool invoked with `isError: false`. (The sporadic pre-existing Cloudflare 400 documented as E5 still occurs intermittently during startup bursts; unrelated to this change - A/B verified earlier.)
+
+### Note discovered during testing
+
+Four `server.py` instances were running concurrently (see E6). Each runs the startup and hourly syncs, so real-world egress scales with the number of live instances. Recommend consolidating to one instance.
+
+**Rollback:** single commit; only column lists and two added methods plus three call-site swaps.

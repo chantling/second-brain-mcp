@@ -274,6 +274,39 @@ class DatabaseManager:
             print(f"[WARNING] Failed to get thought by ID: {e}", file=sys.stderr)
             return None
 
+    async def thought_exists(self, thought_id: int) -> bool:
+        """Cheap existence check for sync paths (~0.03KB/row response).
+
+        Used by startup sync and the watcher's create handler, which only need
+        to know whether an entry with this id still exists. Errors are treated
+        as "not found" to match the previous behavior of get_thought() callers.
+        """
+        try:
+            response = await self._async_execute(
+                self.client.table("thoughts").select("id").eq("id", thought_id)
+            )
+            return bool(response.data)
+        except Exception as e:
+            print(f"[WARNING] Failed to check thought existence: {e}", file=sys.stderr)
+            return False
+
+    async def get_thought_sync_state(self, thought_id: int) -> Optional[Dict]:
+        """Lightweight lookup for the watcher's modify path (~0.15KB/row).
+
+        Returns only id, obsidian_path and file_hash - the fields the watcher
+        needs to decide whether to update. Excludes content/metadata/embedding.
+        """
+        try:
+            response = await self._async_execute(
+                self.client.table("thoughts")
+                .select("id, obsidian_path, file_hash")
+                .eq("id", thought_id)
+            )
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"[WARNING] Failed to get thought sync state: {e}", file=sys.stderr)
+            return None
+
     async def list_recent(
         self, days: int = 7, thought_type: Optional[str] = None
     ) -> List[Dict]:
@@ -603,14 +636,12 @@ class DatabaseManager:
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for obsidian_path={obsidian_path}"
             debug_log_to_file(log_msg)
 
-            # Explicit column list: excludes "embedding" (see get_thought note).
+            # Lightweight columns only: all callers use id / obsidian_path / file_hash
+            # (existence checks, path moves, hash comparison). Avoids downloading
+            # content + metadata (~7KB/row) on every lookup.
             response = await self._async_execute(
                 self.client.table("thoughts")
-                .select(
-                    "id, content, thought_type, topics, people, action_items, "
-                    "obsidian_path, file_hash, metadata, source, created_at, "
-                    "updated_at, deleted, deleted_at"
-                )
+                .select("id, obsidian_path, file_hash")
                 .eq("obsidian_path", obsidian_path)
             )
 

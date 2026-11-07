@@ -1440,8 +1440,10 @@ class ObsidianManager:
                 if metadata and metadata.get("supabase_id"):
                     supabase_id = metadata.get("supabase_id")
                     try:
-                        # Try to get the entry with this ID
-                        existing_entry = await self.db_manager.get_thought(supabase_id)
+                        # Cheap existence check (id only); full row is not needed here
+                        existing_entry = await self.db_manager.thought_exists(
+                            supabase_id
+                        )
 
                         if existing_entry:
                             # Entry still exists and matches frontmatter - skip
