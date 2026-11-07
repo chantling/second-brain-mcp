@@ -819,3 +819,76 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 | Medium | 17 | Missing validation, broad exception handling, no retries, no timeouts, inconsistent patterns |
 | Low | 10 | Dead code, unused imports, log rotation, redundant operations |
 | **Total** | **47** | |
+
+---
+
+## Supplemental Audit: Supabase Egress (2026-11-07)
+
+**Date:** 2026-11-07
+**Trigger:** Supabase egress overage (7.361GB of 5GB in Oct cycle; ~400-500MB/day in Nov cycle). Database is only 184MB total.
+
+### E1. Startup vault sync downloads the embedding column for every note (~400MB per server start)
+
+**File:** `obsidian.py` / `database.py`
+**Lines:** `obsidian.py:1444` and `obsidian.py:1472` (callers); `database.py:251` (`get_thought`) and `database.py:599` (`get_thought_by_obsidian_path`)
+
+**Details:** `sync_existing_notes_to_supabase()` runs on every server startup and, for each markdown file in the vault (~17k notes), calls `get_thought()` or `get_thought_by_obsidian_path()`. Both use `select("*")`, which includes the `embedding` column (vector(1536) ~ 10-30KB JSON per row). Neither caller reads the embedding — they check existence, `id`, `obsidian_path`, and `file_hash` only. One startup pass = ~17k rows x ~2 fetches x ~15KB = roughly 300-500MB of egress. Confirmed in Supabase API logs (2026-11-07): ~700 `GET /rest/v1/thoughts?select=*&id=eq.X` requests in a 100-second burst from `python-httpx/0.28.1` (this server), bracketed by `acquire_lock`/`PATCH server_lock`.
+
+**Impact:** This is the sole cause of the egress overage. Server restarts (each MCP session start) re-download the entire table's embedding column. Also slows startup by ~100 seconds.
+
+**Fix approach:** Replace `select("*")` with an explicit column list excluding `embedding`. No code anywhere reads `thoughts.embedding` from these results (verified by grep: only `folders`/`tags` embeddings are read client-side; thought embeddings are write-only, search happens inside Postgres RPCs).
+
+### E2. Watcher performs the same path lookup twice in `_handle_create`
+
+**File:** `watcher.py`
+**Lines:** 1334 and 1353
+
+**Details:** `get_thought_by_obsidian_path(obsidian_path)` is called twice back-to-back with identical arguments; both blocks return if found. (Already documented as L7 in FoundIssues-Resolutions.md, but never applied — and with E1 unfixed it doubled the per-startup egress.)
+
+**Impact:** Doubled request volume and egress for every created file. After E1 is fixed the cost is negligible.
+
+**Fix approach:** Optionally delete the second block (L7). DECISION 2026-11-07: intentionally NOT removed — it narrows a real race window (concurrent create) and costs ~nothing once selects are skinny. Left in place.
+
+### E3. `links.py` `find_related_notes` uses `select("*")`
+
+**File:** `links.py`
+**Line:** 62
+
+**Details:** Fetches full rows including embeddings for up to 10 related thoughts.
+
+**Impact:** Minor (limit 10), but same pattern as E1.
+
+**Fix approach:** Same explicit column list excluding `embedding`.
+
+### E4. `check_for_duplicates` Tier 2/3 cannot work as written (pre-existing, NOT fixed today)
+
+**File:** `database.py`
+**Lines:** 790-795 and 816-821
+
+**Details:** Tier 2 and Tier 3 fetch `.not_.is_("metadata->>url", "null").limit(1)` — a single arbitrary row — then compare client-side against the new note's URL. A duplicate can only be found if it happens to be that one row. The filter does not constrain by URL at all.
+
+**Impact:** URL-based duplicate detection is effectively non-functional; duplicates by URL are only caught by luck (video_id tier still works).
+
+**Fix approach (future):** Filter server-side, e.g. `.eq("metadata->>url", normalized_url)` (Tier 3 may need the heuristic variants too). Not changed in this pass to keep the diff minimal — column-list-only changes.
+
+### Verification notes (2026-11-07)
+
+- Live `thoughts` table columns confirmed via `information_schema` before editing (see Resolutions file): schema matches `CreateDatabase.sql`; explicit column list is safe.
+- Grep confirmed no test asserts on `thoughts.embedding` returned from `get_thought`/`get_thought_by_obsidian_path`; consumers use `id`, `content`, `obsidian_path`, `file_hash`, truthiness.
+
+### E5. Sporadic Cloudflare 400s on MCP-server-initiated Supabase requests (pre-existing, observed 2026-11-07)
+
+**Files:** `database.py` (all read paths), any caller
+**Symptom:** During end-to-end runs via MCP Inspector, roughly half of Supabase GET requests made by the server process return `HTTP/2 400` with a Cloudflare HTML body. supabase-py surfaces this as `{'message': 'JSON could not be generated', 'code': 400}`, and callers log e.g. `[WARNING] Failed to get thought by ID: ...`, returning `None` to the tool caller (tools still report `isError: false`, with text `None`).
+
+**Verification (A/B, same machine/env):**
+- NEW code (skinny select): 2 x 200, 4 x 400 in one inspector session
+- OLD code (git stash, `select("*")`): 3 x 200, 3 x 400 in one inspector session
+- Same URLs executed from a standalone python client (same `.env`, same key): 200 OK every time
+- Identical requests within one server session both succeed and fail (e.g., `id=eq.16842` 200 while `id=eq.16663` 400), so it is not URL/column dependent
+
+**Conclusion:** Pre-existing, unrelated to the egress fix; reproducible on unmodified `HEAD`. Most likely edge/CDN behavior interacting with concurrent HTTP/2 streams from the server, compounded by the absence of retries (see M-series).
+
+**Impact:** Transient tool failures (returns `None` instead of the note) and skipped sync operations during startup; silent because `isError` stays false.
+
+**Fix approach (future):** Add one bounded retry with backoff for 400/5xx HTML responses at the `_async_execute` level; consider disabling HTTP/2 or reusing a single client with connection limits. NOT changed in this pass (out of scope; would be a behavior change in the most fragile area).

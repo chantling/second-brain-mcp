@@ -247,8 +247,17 @@ class DatabaseManager:
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for supabase_id={thought_id}"
             debug_log_to_file(log_msg)
 
+            # Explicit column list: excludes "embedding" (~10-30KB/row) to avoid
+            # massive egress on bulk lookups (startup sync, watcher). No caller
+            # reads thoughts.embedding; search runs server-side via RPC.
             response = await self._async_execute(
-                self.client.table("thoughts").select("*").eq("id", thought_id)
+                self.client.table("thoughts")
+                .select(
+                    "id, content, thought_type, topics, people, action_items, "
+                    "obsidian_path, file_hash, metadata, source, created_at, "
+                    "updated_at, deleted, deleted_at"
+                )
+                .eq("id", thought_id)
             )
 
             if response.data:
@@ -594,9 +603,14 @@ class DatabaseManager:
             log_msg = f"[{ts}] [DB:LOOKUP] Querying for obsidian_path={obsidian_path}"
             debug_log_to_file(log_msg)
 
+            # Explicit column list: excludes "embedding" (see get_thought note).
             response = await self._async_execute(
                 self.client.table("thoughts")
-                .select("*")
+                .select(
+                    "id, content, thought_type, topics, people, action_items, "
+                    "obsidian_path, file_hash, metadata, source, created_at, "
+                    "updated_at, deleted, deleted_at"
+                )
                 .eq("obsidian_path", obsidian_path)
             )
 

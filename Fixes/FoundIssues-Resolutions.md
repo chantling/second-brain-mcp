@@ -862,3 +862,42 @@ To minimize risk and dependencies, implement in this order:
 | verify.py | L10 | 1 change |
 | package-lock.json | L8 | Delete |
 | tests/__init__.py | L9 | Create |
+---
+
+## Supabase Egress Overages — Resolution (2026-11-07)
+
+**Issues addressed:** E1, E2 (decision), E3 from `FoundIssues.md` (2026-11-07 supplemental audit)
+**Trigger:** Supabase egress 7.361GB vs 5GB limit (Oct cycle); ~400-500MB/day in Nov cycle; DB only 184MB.
+
+### Root cause confirmed
+
+Supabase API logs showed ~700 `GET /rest/v1/thoughts?select=*&id=eq.X` requests in a ~100s startup burst from `python-httpx/0.28.1` (this server), bracketed by `acquire_lock` / `PATCH server_lock`. `sync_existing_notes_to_supabase()` (startup) and the file watcher call `get_thought()` / `get_thought_by_obsidian_path()`, both of which used `select("*")` and therefore downloaded the `embedding` column (~10-30KB JSON per row) for every note, while the callers only use `id`, `obsidian_path`, `file_hash`, or truthiness. One startup pass ≈ 17k rows x ~2 lookups ≈ 300-500MB.
+
+### Changes made
+
+| File | Change |
+|------|--------|
+| `database.py` | `get_thought()`: `select("*")` → explicit columns `id, content, thought_type, topics, people, action_items, obsidian_path, file_hash, metadata, source, created_at, updated_at, deleted, deleted_at` (all columns except `embedding`; `content_tsv` also omitted, server-side only) |
+| `database.py` | `get_thought_by_obsidian_path()`: same explicit column list |
+| `links.py` | `find_related_notes()`: same explicit column list |
+
+### Deliberately NOT changed
+
+- **E2 / L7 (duplicate path lookup in `watcher.py` `_handle_create`, lines 1334 & 1353):** kept. It narrows a real concurrent-create race window; after the column fix each lookup is ~1KB, so the cost is negligible. Removing control flow in the watcher is the highest-risk class of change in this codebase.
+- **E4 (`check_for_duplicates` Tier 2/3):** pre-existing logic defect, untouched (out of scope).
+- **Batched startup sync:** rejected. Egress savings come from removing the embedding payload, not the request count; batching only speeds startup and restructures the most fragile path for ~zero byte savings.
+
+### Pre-flight verification
+
+Queried the LIVE `thoughts` table with the exact explicit column list before editing: all 14 columns exist and the response returns without `embedding`. Confirms the live schema matches `CreateDatabase.sql` (no unknown-column 400 risk).
+
+### Testing performed (2026-11-07)
+
+1. **Direct `DatabaseManager` test:** `get_thought(16663)` → 14 keys, no `embedding`; `get_thought_by_obsidian_path(...)` → no `embedding`; `semantic_search([0.0]*1536)` → 2 results (RPC path intact).
+2. **Direct tool handler test:** `ToolHandlers.get_thought(16663)` → returns note with `obsidian_url`, no `embedding`; `search_by_topic("health")` → 2 results.
+3. **End-to-end MCP Inspector:** `tools/call get_thought` → server boots, tool invoked, `isError: false`. Network trace confirms the new selection on the wire (`select=id%2Ccontent%2C...%2Cdeleted_at`) and a `200 OK` for a row fetched with it.
+4. **Regression A/B:** behavior of the sporadic Cloudflare 400s (see E5) is identical on old and new code, proving they are pre-existing and unrelated.
+
+**Expected outcome:** startup/watcher egress drops from ~400MB to ~5-15MB per pass (~95-97% reduction); daily egress should return to the previous 0-30MB baseline. Startup should also be faster.
+
+**Rollback:** single commit touching only three `select(...)` calls; `git revert` is sufficient.

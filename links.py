@@ -57,9 +57,14 @@ class LinkManager:
             return []
 
         # Fetch related thoughts
+        # Explicit column list: excludes "embedding" (~10-30KB/row, unused here)
         response = (
             self.db_manager.client.table("thoughts")
-            .select("*")
+            .select(
+                "id, content, thought_type, topics, people, action_items, "
+                "obsidian_path, file_hash, metadata, source, created_at, "
+                "updated_at, deleted, deleted_at"
+            )
             .in_("id", list(related_ids))
             .limit(limit)
             .execute()
