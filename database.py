@@ -464,6 +464,7 @@ class DatabaseManager:
             "total": len(folders_data),
             "created": 0,
             "updated": 0,
+            "skipped": 0,
             "cached": 0,
             "errors": [],
         }
@@ -472,14 +473,45 @@ class DatabaseManager:
 
         embedding_manager = EmbeddingGenerator()
 
+        # One lightweight fetch (without the ~19 KB embedding column) instead
+        # of one select("*") per folder on every startup. Paginated because
+        # PostgREST caps a single response at 1000 rows.
+        try:
+            existing_rows = []
+            offset = 0
+            page_size = 1000
+
+            while True:
+                response = await self._async_execute(
+                    self.client.table("folders")
+                    .select(
+                        "path, folder_name, full_path_hierarchy, description"
+                    )
+                    .order("path")
+                    .range(offset, offset + page_size - 1)
+                )
+                rows = response.data or []
+                existing_rows.extend(rows)
+                if len(rows) < page_size:
+                    break
+                offset += page_size
+
+            existing_by_path = {row["path"]: row for row in existing_rows}
+        except Exception as e:
+            # Do not continue: treating every folder as new would insert
+            # duplicates when the table already has rows.
+            print(
+                f"[WARNING] Failed to list folders, skipping folder sync: {e}",
+                file=sys.stderr,
+            )
+            await embedding_manager.close()
+            stats["errors"].append(f"Failed to list folders: {str(e)}")
+            return stats
+
         for folder_info in folders_data:
             try:
                 path = folder_info["path"]
-
-                # Check if folder exists
-                existing = await self._async_execute(
-                    self.client.table("folders").select("*").eq("path", path)
-                )
+                existing = existing_by_path.get(path)
 
                 # Use pre-computed embedding if provided (from cache or DB)
                 # Only generate embedding if None (defensive fallback)
@@ -503,15 +535,27 @@ class DatabaseManager:
                     "embedding": embedding,
                 }
 
-                if not existing.data:
+                if existing is None:
                     # Create new folder
-                    await self._async_execute(self.client.table("folders").insert(folder_data))
+                    await self._async_execute(
+                        self.client.table("folders").insert(folder_data)
+                    )
                     stats["created"] += 1
+                elif (
+                    existing.get("folder_name") == folder_info["folder_name"]
+                    and existing.get("full_path_hierarchy")
+                    == folder_info["hierarchy"]
+                    and existing.get("description") == folder_info["description"]
+                ):
+                    # Nothing changed - skip the write
+                    stats["skipped"] += 1
                 else:
                     # Update existing folder
-                    await self._async_execute(self.client.table("folders").update(folder_data).eq(
-                        "path", path
-                    ))
+                    await self._async_execute(
+                        self.client.table("folders")
+                        .update(folder_data)
+                        .eq("path", path)
+                    )
                     stats["updated"] += 1
 
             except Exception as e:

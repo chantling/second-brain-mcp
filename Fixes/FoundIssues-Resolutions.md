@@ -1059,3 +1059,33 @@ The per-insert lock + final path re-check from the previous change is unchanged,
 ### Operational note
 
 During this work, 45 stale MCP processes from dead stacks (financialcalc 18, logstrip 17, symdex 8, youtube 2; ~1 GB) were terminated. The kill list contained no second-brain processes. Separately, the dynamic-mcp stack disappeared and the MCP tool catalog dropped dynamic-mcp; second-brain was not running at the end of this session. Restart the MCP stack/OpenChamber to load these changes.
+
+---
+
+## Folder cache parser + folder sync egress (2026-11-07)
+
+**Issues addressed:** E13, E14 (FoundIssues.md).
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `obsidian.py` | `_load_folder_embeddings_cache()` strips the leading/trailing `|` before splitting, so the file written as `|path|embedding|` actually parses. Previously it returned 0 entries on every startup. |
+| `obsidian.py` | `sync_folders_to_database()` now fetches only folders missing from the cache (one `.eq()` each) instead of the whole `folders` table. Bulk fallback only when the cache is invalid or more than 20 folders are missing. PostgREST `in.()` is deliberately not used: 4 folder names contain commas/parentheses. |
+| `obsidian.py` | The database query in Phase 2 is now awaited through `_async_execute` instead of calling `.execute()` synchronously on the event loop. |
+| `database.py` | `sync_folders()` fetches `path, folder_name, full_path_hierarchy, description` once (paginated, no embedding), compares, and skips unchanged rows. It aborts on a failed batch read rather than treating every folder as new (which would duplicate rows). |
+| `database.py` | Added `skipped` to the stats dict; the existing caller already printed it. |
+
+### Tests (2026-11-07)
+
+1. `py_compile` on obsidian.py and database.py - OK.
+2. Cache load: **289 entries**, all 162 current vault folders covered.
+3. Real vault sync: **0.96-1.09 s**, `0 created / 0 updated / 160 skipped`, no database embedding fetch, cache saved.
+4. Simulated newly created folder (one cache entry removed): **0.76-0.89 s**, `Fetching embeddings for 1 folder(s)`, **1** row fetched from the DB (not 289), 160 skipped.
+5. Insert branch: synthetic folder `created=1`; immediate repeat `skipped=1`; temporary row deleted (0 left).
+6. Update branch: changed `Books` description to a sentinel, ran the sync; `updated=1`, description repaired and restored **exactly**. A legacy row (`--Attachments--`, not in the current vault) touched during the test was restored exactly (75 bytes).
+7. A failed batch read aborts the sync (no writes) instead of inserting duplicates.
+
+### Operational note
+
+The live stacks (2:44 and 3:02 dmcp) still run the pre-fix code; these changes load on the next MCP restart. The active cache is now valid until 2026-11-14 unless a restart rewrites it.

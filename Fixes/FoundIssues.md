@@ -1009,3 +1009,23 @@ This was **not** what blocks DMCP initialization: a direct stdio probe measured 
 **Details:** Every MCP tool call scheduled a full orphan cleanup: two paginated queries plus a synchronous scan of all 3,701 vault files, holding the global `server_lock` for ~5.6 s. Any note edit during that window failed to acquire `modify_update` and had its update **skipped**.
 
 **Status: FIXED 2026-11-07.** Throttled by `ORPHAN_CLEANUP_MIN_INTERVAL_SECONDS` (default 300 s). Startup cleanup and the 10-minute periodic loop are unchanged. Measured: first call 5.63 s, immediate second call 0.001 s.
+
+### E13. Folder embeddings cache never loaded (measured 2026-11-07)
+
+**File:** `obsidian.py` (`_load_folder_embeddings_cache` / `_save_folder_embeddings_cache`)
+
+**Details:** The writer saves each row as `|folder_path|embedding|`, but the loader split the line on `|` and used `parts[0]` as the path. Every data line starts with `|`, so `parts[0]` was empty and `parts[1]` (the path) failed float conversion; the loader returned **0 entries** on every startup. `_is_cache_valid()` still returned true because the file was rewritten each run, producing the misleading sequence "Using valid local folder cache" followed by "Fetching 160 folder embeddings from database".
+
+**Impact:** Every startup bulk-downloaded all 289 folder embeddings (~19.2 KB each, **~5.6 MB**) even when nothing changed. This was the remaining startup egress after E1/E11. The April 21 file date seen during the investigation belongs to an old Syncthing replica on `D:`, not the active vault.
+
+**Status: FIXED 2026-11-07.** The loader strips the outer pipes before splitting. The active cache now loads **289 entries** and covers all 162 current vault folders.
+
+### E14. Folder sync downloaded embeddings per folder and wrote every row every startup (measured 2026-11-07)
+
+**File:** `database.py` (`sync_folders`), `obsidian.py` (`sync_folders_to_database`)
+
+**Details:** `sync_folders` issued one `select("*")` per folder; each response included the **19.2 KB embedding**, then an unconditional `PATCH` with the same embedding. 160 folders => ~3.1 MB downloaded, ~3.1 MB uploaded, 160 write transactions, ~55 s startup. Separately, if even one folder was missing from the cache, `sync_folders_to_database` fetched **all** folder embeddings because the "missing folders" query had no path filter.
+
+**Status: FIXED 2026-11-07.** `sync_folders` now fetches `path, folder_name, full_path_hierarchy, description` once (paginated, no embedding), compares, and writes only created/changed rows. Missing-folder fetches are per-path (PostgREST `in.()` breaks on folder names containing commas/parentheses) with a bulk fallback only when the cache is invalid or more than 20 folders are missing.
+
+**Result:** real-vault sync **~1.0 s** (was ~55 s), **0 created / 0 updated / 160 skipped**, no bulk fetch; a simulated new folder fetched **1** embedding instead of 289.

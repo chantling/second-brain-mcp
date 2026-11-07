@@ -499,8 +499,9 @@ class ObsidianManager:
 
         # Phase 1: Load local cache and scan folders
         folder_embeddings = {}
+        cache_valid = self._is_cache_valid()
 
-        if self._is_cache_valid():
+        if cache_valid:
             print("[INFO] Using valid local folder cache", file=sys.stderr)
             folder_embeddings = self._load_folder_embeddings_cache()
             print(
@@ -550,25 +551,45 @@ class ObsidianManager:
                     f"[WARNING] Failed to process folder {folder}: {e}", file=sys.stderr
                 )
 
-        # Phase 2: Batch fetch missing folders from database
+        # Phase 2: Fetch missing folders from database
         folders_to_generate = []
 
         if folders_to_process:
+            # Only fetch the folders missing from the cache. The previous query
+            # downloaded every folder's embedding whenever even one folder was
+            # missing (~5.6 MB for one new folder). PostgREST's in.() list cannot
+            # be used here: folder names contain commas and parentheses, which
+            # break its value parsing.
+            fetch_all = (not cache_valid) or len(folders_to_process) > 20
             print(
-                f"[INFO] Fetching {len(folders_to_process)} folder embeddings from database...",
+                f"[INFO] Fetching embeddings for {len(folders_to_process)} folder(s) "
+                f"from database{' (bulk)' if fetch_all else ''}...",
                 file=sys.stderr,
             )
 
             try:
-                # Query DB for all folders at once (Option A: batch query)
-                response = (
-                    self.db_manager.client.table("folders")
-                    .select("path, embedding")
-                    .execute()
-                )
+                db_folders = []
 
-                if response.data:
-                    for db_folder in response.data:
+                if fetch_all:
+                    response = await self.db_manager._async_execute(
+                        self.db_manager.client.table("folders").select(
+                            "path, embedding"
+                        )
+                    )
+                    db_folders = response.data or []
+                else:
+                    for folder_path in folders_to_process:
+                        response = await self.db_manager._async_execute(
+                            self.db_manager.client.table("folders")
+                            .select("path, embedding")
+                            .eq("path", folder_path)
+                        )
+                        db_folders.extend(response.data or [])
+
+                if db_folders:
+                    folder_info_by_path = {f["path"]: f for f in folders_data}
+
+                    for db_folder in db_folders:
                         path = db_folder.get("path")
                         embedding = db_folder.get("embedding")
 
@@ -583,15 +604,14 @@ class ObsidianManager:
                             folder_embeddings[path] = embedding
 
                             # Update corresponding folder_data entry
-                            for folder_info in folders_data:
-                                if folder_info["path"] == path:
-                                    folder_info["embedding"] = embedding
-                                    if DEBUG:
-                                        print(
-                                            f"[DEBUG] Fetched embedding from DB for {path}",
-                                            file=sys.stderr,
-                                        )
-                                    break
+                            folder_info = folder_info_by_path.get(path)
+                            if folder_info is not None:
+                                folder_info["embedding"] = embedding
+                                if DEBUG:
+                                    print(
+                                        f"[DEBUG] Fetched embedding from DB for {path}",
+                                        file=sys.stderr,
+                                    )
 
                     # Remove folders we found in database
                     folders_to_generate = [
@@ -1010,27 +1030,36 @@ class ObsidianManager:
             cache = {}
 
             for line in lines:
-                if "|" in line:
-                    parts = line.split("|")
-                    if len(parts) >= 2:
-                        folder_path = parts[0].strip()
-                        try:
-                            # Parse the embedding (remove brackets and split)
-                            embedding_str = parts[1].strip()
-                            if embedding_str.startswith("[") and embedding_str.endswith(
-                                "]"
-                            ):
-                                embedding_str = embedding_str[1:-1]
-                            embedding = [
-                                float(x.strip()) for x in embedding_str.split(",")
-                            ]
-                            cache[folder_path] = embedding
-                        except Exception as e:
-                            if DEBUG:
-                                print(
-                                    f"[DEBUG] Failed to parse cache entry for {folder_path}: {e}",
-                                    file=sys.stderr,
-                                )
+                if "|" not in line:
+                    continue
+
+                # Lines are written as |folder_path|embedding|. Strip the outer
+                # pipes before splitting: otherwise parts[0] is empty and every
+                # entry is silently dropped, forcing a full DB fetch each start.
+                row = line.strip()
+                if row.startswith("|") and row.endswith("|"):
+                    row = row[1:-1]
+
+                parts = row.split("|")
+                if len(parts) >= 2:
+                    folder_path = parts[0].strip()
+                    try:
+                        # Parse the embedding (remove brackets and split)
+                        embedding_str = parts[1].strip()
+                        if embedding_str.startswith("[") and embedding_str.endswith(
+                            "]"
+                        ):
+                            embedding_str = embedding_str[1:-1]
+                        embedding = [
+                            float(x.strip()) for x in embedding_str.split(",")
+                        ]
+                        cache[folder_path] = embedding
+                    except Exception as e:
+                        if DEBUG:
+                            print(
+                                f"[DEBUG] Failed to parse cache entry for {folder_path}: {e}",
+                                file=sys.stderr,
+                            )
 
             if DEBUG:
                 print(
