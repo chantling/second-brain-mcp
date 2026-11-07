@@ -3,7 +3,7 @@ import sys
 import asyncio
 import logging
 from typing import Dict, List, Optional, Set
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from config import Config
@@ -15,6 +15,23 @@ logger = logging.getLogger('second_brain.database')
 
 
 # Helper function for debug logging
+def _json_safe(value):
+    """Recursively convert date/datetime and non-JSON values for JSONB storage.
+
+    Frontmatter timestamps (e.g. `created: 2026-04-12T22:18:24`) are parsed by
+    PyYAML into datetime objects, which the Supabase client cannot serialize.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
 def debug_log_to_file(message: str):
     """Write message to database_debug.log if DEBUG is enabled"""
     if not Config.DEBUG:
@@ -96,7 +113,7 @@ class DatabaseManager:
         log_msg = f"[{ts}] [DB:INSERT] Inserting new entry: path={obsidian_path}, hash={file_hash[:8] if file_hash else 'NONE'}..., source={source}"
         debug_log_to_file(log_msg)
 
-        thought_data = {
+        thought_data = _json_safe({
             "content": content,
             "embedding": embedding,
             "thought_type": metadata.get("type", "knowledge"),
@@ -107,7 +124,7 @@ class DatabaseManager:
             "metadata": metadata,
             "source": source,
             "file_hash": file_hash,
-        }
+        })
 
         # Insert into thoughts table
         try:
@@ -688,13 +705,30 @@ class DatabaseManager:
             return False
 
     async def get_all_thoughts(self) -> List[Dict]:
-        """Get all thoughts from database (for orphan verification)"""
-        try:
-            response = await self._async_execute(
-                self.client.table("thoughts").select("id, obsidian_path")
-            )
+        """Get all thoughts from database (for orphan verification).
 
-            return response.data if response.data else []
+        Paginated: PostgREST caps a single response at 1000 rows, so an
+        unpaginated query silently hides newer entries from orphan cleanup.
+        """
+        try:
+            page_size = 1000
+            offset = 0
+            all_rows: List[Dict] = []
+
+            while True:
+                response = await self._async_execute(
+                    self.client.table("thoughts")
+                    .select("id, obsidian_path")
+                    .order("id")
+                    .range(offset, offset + page_size - 1)
+                )
+                rows = response.data if response.data else []
+                all_rows.extend(rows)
+
+                if len(rows) < page_size:
+                    return all_rows
+
+                offset += page_size
         except Exception as e:
             print(f"[WARNING] Failed to get all thoughts: {e}", file=sys.stderr)
             return []
@@ -747,7 +781,7 @@ class DatabaseManager:
             update_data["topics"] = metadata.get("topics", [])
             update_data["people"] = metadata.get("people", [])
             update_data["action_items"] = metadata.get("action_items", [])
-            update_data["metadata"] = metadata
+            update_data["metadata"] = _json_safe(metadata)
             update_data["thought_type"] = metadata.get("type", "knowledge")
 
         response = await self._async_execute(
@@ -767,7 +801,7 @@ class DatabaseManager:
         metadata: Dict,
     ) -> int:
         """Update existing thought content in place (for duplicate overwrites)"""
-        thought_data = {
+        thought_data = _json_safe({
             "content": content,
             "embedding": embedding,
             "thought_type": metadata.get("type", "knowledge"),
@@ -776,7 +810,7 @@ class DatabaseManager:
             "action_items": metadata.get("action_items", []),
             "metadata": metadata,
             "updated_at": datetime.now().isoformat(),
-        }
+        })
 
         response = await self._async_execute(
             self.client.table("thoughts")

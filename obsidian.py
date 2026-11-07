@@ -1520,11 +1520,36 @@ class ObsidianManager:
                     print(
                         f"[SYNC] store_metadata={store_metadata}", file=sys.stderr
                     )
-                supabase_id = await self.db_manager.store_thought(
-                    content,
-                    embedding,
-                    store_metadata,
-                )
+
+                # Serialize the insert with the watcher and other instances, and
+                # re-check the path now that metadata/embedding are ready. Without
+                # this, a concurrent writer can insert the same note (E9).
+                if self._lock:
+                    if not await self._lock.acquire(
+                        "sync_import", Config.LOCK_TTL_SECONDS
+                    ):
+                        print(
+                            f"[SYNC] Could not acquire insert lock, skipping: {rel_path}",
+                            file=sys.stderr,
+                        )
+                        skipped_count += 1
+                        continue
+                try:
+                    if await self.db_manager.get_thought_by_obsidian_path(rel_path):
+                        print(
+                            f"[SYNC] Entry appeared during import, skipping: {rel_path}",
+                            file=sys.stderr,
+                        )
+                        skipped_count += 1
+                        continue
+                    supabase_id = await self.db_manager.store_thought(
+                        content,
+                        embedding,
+                        store_metadata,
+                    )
+                finally:
+                    if self._lock:
+                        await self._lock.release()
                 if Config.DEBUG:
                     print(
                         f"[SYNC] Stored with supabase_id={supabase_id}",
@@ -1654,6 +1679,17 @@ class ObsidianManager:
                             "file_hash": file_hash,
                             "source": "obsidian_sync_takeover",
                         }
+
+                        # Re-check: a row may have appeared while metadata/embedding
+                        # were generated (this sync holds the lock, but not against
+                        # inserts made before acquisition).
+                        if await self.db_manager.get_thought_by_obsidian_path(rel_path):
+                            print(
+                                f"[SYNC] Entry appeared during import, skipping: {rel_path}",
+                                file=sys.stderr,
+                            )
+                            skipped_count += 1
+                            continue
 
                         supabase_id = await self.db_manager.store_thought(
                             content,

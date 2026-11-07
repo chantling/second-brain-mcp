@@ -976,3 +976,57 @@ No control flow changed in the server startup path: `validate()` still initializ
 The 88 rows created by the audit were backed up (thoughts + 96 `thought_tags` rows, 2.97 MB) to `%TEMP%\opencode\ticker_rows_backup_2026-11-07.json`, then deleted through `delete_thought_by_id` (links/tags cleaned). Verified: 0 `!Ticker-Analyses!` rows remain; total rows 2,004 -> 1,916.
 
 **Rollback:** revert the commit; restore the 88 rows from the JSON backup if needed (no links existed; 96 tag rows are in the backup).
+
+---
+
+## Orphan-cleanup pagination, data reconciliation, insert guards, JSON-safe metadata (2026-11-07)
+
+**Issues addressed:** E8, E9, E10 (FoundIssues.md).
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `database.py` | `get_all_thoughts()` now paginates: `.select(...).order("id").range(offset, offset+999)` until a short page |
+| `database.py` | New `_json_safe()` helper; applied to `store_thought`, `update_thought`, `update_thought_content` payloads |
+| `obsidian.py` | Startup sync takes the shared insert lock (`Config.LOCK_TTL_SECONDS`) only around the insert, then performs a final `get_thought_by_obsidian_path()` re-check |
+| `obsidian.py` | Changed-note sync re-checks the path immediately before insert (it already holds the lock) |
+| `watcher.py` | Create and modify-recreate re-check the path immediately after acquiring their existing lock |
+
+### Why not hold the startup-sync lock for the whole scan
+
+`SupabaseLock` is a **single global row** (`server_lock`, id=1) shared by every operation. Holding it for a 10-15 minute startup sync would make another instance's `modify_update` acquisition fail, and that path logs and **skips the note update**. The chosen guard holds the lock for ~1 second around the insert and adds a cheap final re-check, which removes the duplicate window without blocking edits.
+
+### Data reconciliation performed
+
+1. Reviewed dry-run (read-only): 290 deletions, 11 path updates, 91 duplicate groups -> 0.
+2. Backed up the 290 rows + 791 `thought_tags` rows (7.4 MB) to `%TEMP%\opencode\orphan_cleanup_backup_2026-11-07.json`.
+3. Ran the production cleanup (`ObsidianManager.remove_orphaned_supabase_entries`, lock-protected): **290 removed, 11 moved paths updated**.
+4. Repaired one pre-existing inconsistency: row 17961 (`YouTube - Sharbel A.`) had an empty `obsidian_path`; set it to `Resources\Computer\AI\10 New Hermes Agent Skills to Install.md`.
+5. Fixed E10 and re-ran the startup sync: **2 synced, 3699 skipped, 0 errors** (ids 18285, 18286).
+
+### Final state (verified 2026-11-07)
+
+- rows: **1,628**
+- duplicate `obsidian_path` groups: **0**
+- pathless rows: **0**
+- rows whose stored path does not exist: **0**
+- rows pointing at blacklisted paths: **0**
+- non-blacklisted notes with `supabase_id`: 1,628; every one has a matching row
+
+### Testing
+
+1. `py_compile` on all touched files - OK.
+2. `get_all_thoughts()` returns 1,626 (two pages) before the final imports and 1,628 after - full id range, no truncation.
+3. `_json_safe()` converts `date`/`datetime` (nested in dicts/lists) to ISO strings; verified directly.
+4. Production cleanup output: `Removed 290 orphaned Supabase entries`, `Updated 11 moved note paths`.
+5. Startup sync after E10 fix: `0 errors`, both previously stuck notes imported and frontmatter updated.
+6. Post-run audit confirms 0 duplicates, 0 orphan paths, 0 blacklisted rows.
+
+### Backups
+
+- `%TEMP%\opencode\ticker_rows_backup_2026-11-07.json` (88 audit rows, 96 tags)
+- `%TEMP%\opencode\orphan_cleanup_backup_2026-11-07.json` (290 rows, 791 tags, moves list)
+- `%TEMP%\opencode\orphan_cleanup_dryrun_2026-11-07.csv` (reviewed deletion list)
+
+**Rollback:** revert the commit; restore rows from the JSON backups if needed. Note the cleanup deleted rows that `delete_thought_by_id` had already removed from `links`/`thought_tags`; those are included in the backup.

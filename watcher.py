@@ -1439,6 +1439,19 @@ class ObsidianEventHandler(FileSystemEventHandler):
             try:
                 await lock.start_auto_renew()
 
+                # Final duplicate guard: a row may have appeared while metadata/
+                # embedding were generated, before we took the lock.
+                if await db_manager.get_thought_by_obsidian_path(obsidian_path):
+                    _log(
+                        f"[CREATE] SKIP: entry appeared during import: {obsidian_path}",
+                        "CREATE",
+                    )
+                    print(
+                        f"[WATCHER] Entry appeared during import, skipping: {obsidian_path}",
+                        file=sys.stderr,
+                    )
+                    return
+
                 _log(
                     f"[CREATE] Calling db_manager.store_thought() for {obsidian_path}",
                     "CREATE",
@@ -1675,6 +1688,13 @@ class ObsidianEventHandler(FileSystemEventHandler):
                     return
                 try:
                     await lock.start_auto_renew()
+                    # Final duplicate guard before creating from a modify event.
+                    if await db_manager.get_thought_by_obsidian_path(obsidian_path):
+                        _log(
+                            f"[MODIFY] SKIP: entry appeared during create: {obsidian_path}",
+                            "MODIFY",
+                        )
+                        return
                     _log(
                         f"[MODIFY] Calling db_manager.store_thought() for new entry",
                         "MODIFY",

@@ -951,6 +951,8 @@ Consequences:
 
 **Fix approach:** paginate with `.order("id").range(offset, offset+page-1)` until a short page; run a dry-run listing of would-be deletions before enabling destructive cleanup.
 
+**Status: FIXED 2026-11-07.** `get_all_thoughts()` now pages with `.order("id").range()`. A reviewed dry-run (290 rows) was applied through the production cleanup: 290 deleted, 11 moved paths updated, duplicate groups 91 -> 0, rows 2,004 -> 1,628.
+
 ### E9. 91 `obsidian_path` values have multiple rows (investigated 2026-11-07)
 
 **Details:** `thoughts.obsidian_path` is the vault-relative file path (e.g. `Resources\Recipes\Chickpea Bread (My Changes).md`) linking a DB row to its note. The reverse link is the `supabase_id` in the note's YAML frontmatter.
@@ -973,3 +975,17 @@ Consequences:
 **Impact:** Every sync/lookup can pick an arbitrary row from a duplicate group; updates may land on one row while another stays stale; egress and orphan risk grow.
 
 **Fix approach (future):** (a) fix pagination (E8); (b) one-off reconciliation keeping the row whose id matches the note frontmatter (else the one whose hash matches the current file, else newest) and deleting the rest via `delete_thought_by_id`; (c) then add a `UNIQUE` index on `obsidian_path` (or change inserts to upsert) so races fail instead of duplicating.
+
+**Status: RESOLVED 2026-11-07.** The paginated cleanup cleared all 91 groups (290 rows). Insert-time guards now close the race: the startup sync takes the shared lock only around the insert plus a final path re-check, and the watcher re-checks under its existing lock. A `UNIQUE` index remains deferred (post-cleanup).
+
+### E10. Unquoted frontmatter dates break inserts and updates (found 2026-11-07)
+
+**File:** `database.py` (`store_thought`, `update_thought`, `update_thought_content`), `obsidian.py` (frontmatter parsing)
+
+**Details:** Unquoted ISO timestamps in frontmatter (`created: 2026-04-12T22:18:24`) are parsed by PyYAML into `datetime` objects. They were passed inside the `metadata` JSONB payload, and the Supabase client raised `Object of type date is not JSON serializable`, aborting the insert (`[ERROR] Failed to sync ...`). The same applies to `update_thought`/`update_thought_content`, so editing a note with a YAML date could fail silently.
+
+Found on the two notes that could not be re-imported after cleanup: `Resources\Health\Heart Health\One Blood Marker That Predicts Stroke.md` (old id 9103) and `Resources\Recipes\Frozen Cottage Cheese Protein Bark.md` (old id 2001). Both had `created:` timestamps in frontmatter.
+
+**Impact:** The affected notes can never be imported/updated; each startup retries, burns embedding calls and fails again. Silent because the sync only logs an error count.
+
+**Status: FIXED 2026-11-07.** New `_json_safe()` helper recursively converts date/datetime (and other non-JSON values) to ISO strings; applied to the payloads of `store_thought`, `update_thought` and `update_thought_content`. Re-ran the startup sync: `2 synced, 3699 skipped, 0 errors`; the notes received ids 18285 and 18286.
