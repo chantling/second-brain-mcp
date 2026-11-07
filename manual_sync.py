@@ -12,7 +12,11 @@ from database import DatabaseManager
 async def sync_existing_notes():
     """Sync all existing markdown files to database"""
     print("Starting manual sync of existing notes...", file=sys.stderr)
-    
+
+    # Initialize the blacklist before any scanning. Without this, is_blacklisted()
+    # sees zero patterns and imports excluded folders (.trash, !Ticker-Analyses!, ...).
+    Config.validate()
+
     # Initialize managers
     db_manager = DatabaseManager()
     obsidian_manager = ObsidianManager(

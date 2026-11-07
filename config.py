@@ -45,6 +45,7 @@ class Config:
     IGNORED_PATHS: List[str] = []
     IGNORED_FILES: List[str] = []
     _blacklist_mtime: Optional[float] = None
+    _blacklist_initialized: bool = False
     # Unified pattern storage: list of (raw_pattern, pattern_type, compiled_regex)
     # Types: "folder", "file", "glob", "abs_folder", "abs_file"
     _blacklist_patterns: List[Tuple[str, str, "re.Pattern"]] = []
@@ -309,6 +310,7 @@ class Config:
             cls._blacklist_mtime = cls.BLACKLIST_FILE_PATH.stat().st_mtime
         else:
             cls._blacklist_mtime = None
+        cls._blacklist_initialized = True
 
         if Config.DEBUG:
             print(
@@ -474,6 +476,11 @@ class Config:
 
         Returns: The matching blacklist pattern string if excluded, empty string otherwise.
         """
+        # Lazy-init: scripts that import Config directly never call validate(),
+        # which would otherwise leave the blacklist empty and import excluded notes.
+        if not cls._blacklist_initialized:
+            cls._initialize_blacklists()
+
         rel_normalized = rel_path.replace("\\", "/")
 
         for raw, ptype, compiled in cls._blacklist_patterns:

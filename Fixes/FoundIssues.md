@@ -935,6 +935,8 @@ Only `config.py:25` uses the config value. The rest are hardcoded.
 
 **Fix approach:** lazy-initialize in `is_blacklisted()` (e.g. `if not patterns and _blacklist_mtime is None: _initialize_blacklists()`), and/or call `Config.validate()` explicitly in `manual_sync.py`. Remove the 88 rows created during the audit (they are outside the cleanup window, see E8).
 
+**Status: FIXED 2026-11-07.** `Config.is_blacklisted()` now lazy-initializes (`_blacklist_initialized` flag, set by `_initialize_blacklists()`), and `manual_sync.py` calls `Config.validate()` first. The 88 audit rows were backed up to `%TEMP%\opencode\ticker_rows_backup_2026-11-07.json` and deleted.
+
 ### E8. `get_all_thoughts()` is not paginated, so orphan cleanup only inspects the oldest 1,000 of ~2,000 rows (2026-11-07)
 
 **File:** `database.py` (`get_all_thoughts`, ~line 690), `obsidian.py` (`_do_remove_orphaned_supabase_entries`)

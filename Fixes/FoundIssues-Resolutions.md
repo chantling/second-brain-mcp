@@ -944,3 +944,35 @@ Startup sync payload: ~8 KB/row -> ~0.03-0.18 KB/row, i.e. a ~1,000-2,000 lookup
 **Correction (2026-11-07, later):** this was a miscount. Four OS processes were **two** server instances - `venv\Scripts\python.exe` is a uv trampoline that re-executes the base interpreter, so every instance is two processes. A second `dmcp.exe` stack existed transiently from 10:50 and exited later. The startup sync takes no distributed lock, so overlapping instances can import the same notes concurrently. See corrected E6 in FoundIssues.md.
 
 **Rollback:** single commit; only column lists and two added methods plus three call-site swaps.
+
+---
+
+## Blacklist lazy-initialization (2026-11-07, egress audit follow-up)
+
+**Issue:** E7 in FoundIssues.md.
+
+### Problem
+
+`Config._blacklist_patterns` was empty until `Config.validate()` (or the watcher's 30 s reload) ran. `server.py:723` calls `validate()` before `main()`, so the server was correct, but `manual_sync.py` and ad-hoc scripts imported `Config` directly and scanned the entire vault, including `.trash`, `!Ticker-Analyses!` and `!To-Do!`. A 10-minute manual run during the audit created 88 `!Ticker-Analyses!` rows (15:59:45-16:09:20Z).
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `config.py` | Added `_blacklist_initialized` flag; `_initialize_blacklists()` sets it; `is_blacklisted()` calls `_initialize_blacklists()` once when not yet initialized |
+| `manual_sync.py` | Calls `Config.validate()` before creating managers |
+
+No control flow changed in the server startup path: `validate()` still initializes first, so the lazy branch is a no-op there.
+
+### Tests
+
+1. `py_compile config.py manual_sync.py` - OK.
+2. Fresh process importing `Config` without `validate()`: `_blacklist_patterns` = 0, then `is_blacklisted("!Ticker-Analyses!\\Fairly Valued\\X.md")` returns `.\!Ticker-Analyses!`, patterns = 8, initialized = True.
+3. `.trash\old.md` matches `.trash`; `Resources\Recipes\x.md` returns empty.
+4. Full vault with the blacklist active: 2,073/3,701 files skipped; all 1,628 remaining notes have `supabase_id`; 0 genuinely unsynced.
+
+### Data cleanup
+
+The 88 rows created by the audit were backed up (thoughts + 96 `thought_tags` rows, 2.97 MB) to `%TEMP%\opencode\ticker_rows_backup_2026-11-07.json`, then deleted through `delete_thought_by_id` (links/tags cleaned). Verified: 0 `!Ticker-Analyses!` rows remain; total rows 2,004 -> 1,916.
+
+**Rollback:** revert the commit; restore the 88 rows from the JSON backup if needed (no links existed; 96 tag rows are in the backup).
