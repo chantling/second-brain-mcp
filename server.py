@@ -311,6 +311,37 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="delete_note",
+            description="Delete a note from Supabase and the Obsidian vault. Dry run by default; set confirm=true to delete. Removes the Supabase row, its links and tag associations, and moves the .md file to Obsidian's .trash unless permanent=true. Provide thought_id and/or obsidian_path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "thought_id": {
+                        "type": "integer",
+                        "description": "Supabase thought ID (from semantic_search or get_thought)",
+                    },
+                    "obsidian_path": {
+                        "type": "string",
+                        "description": "Vault-relative path exactly as returned by search/get, e.g. !To-Sort!\\Note.md. Absolute paths inside the vault are also accepted.",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Must be true to actually delete. With false, returns a preview and changes nothing.",
+                    },
+                    "permanent": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, unlink the file permanently. Otherwise move it to Obsidian's .trash. Permanent deletes are disabled unless ALLOW_PERMANENT_DELETE=true.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional reason recorded in the trash manifest.",
+                    },
+                },
+            },
+        ),
     ]
 
 

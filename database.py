@@ -726,6 +726,22 @@ class DatabaseManager:
             print(f"[WARNING] Failed to get thought by path: {e}", file=sys.stderr)
             return None
 
+    async def get_thought_ids_by_obsidian_path(self, obsidian_path: str) -> List[int]:
+        """Return every thought ID stored at an exact Obsidian path."""
+        try:
+            response = await self._async_execute(
+                self.client.table("thoughts")
+                .select("id")
+                .eq("obsidian_path", obsidian_path)
+            )
+            return [row["id"] for row in (response.data or [])]
+        except Exception as e:
+            print(
+                f"[WARNING] Failed to list thought IDs by path: {e}",
+                file=sys.stderr,
+            )
+            return []
+
     async def delete_thought_by_obsidian_path(self, obsidian_path: str) -> bool:
         """Delete thought by Obsidian file path"""
         _log(

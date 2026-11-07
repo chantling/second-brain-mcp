@@ -2,6 +2,7 @@ import os
 import sys
 import uuid
 import json
+import shutil
 import yaml
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -360,6 +361,131 @@ class ObsidianManager:
         if not str(full).startswith(str(vault_resolved)):
             return "!To-Sort!"
         return folder_path
+
+    def resolve_note_path(self, obsidian_path: str) -> Path:
+        """Resolve a note path, rejecting anything outside the vault or blacklisted."""
+        if not obsidian_path:
+            raise ValueError("A note path is required")
+
+        vault = self.vault_path.resolve()
+        raw = Path(obsidian_path)
+        candidate = raw if raw.is_absolute() else (vault / raw)
+
+        # Reject a symlink itself before resolve() follows it; deleting the
+        # resolved target instead of the link would be surprising.
+        if candidate.is_symlink():
+            raise ValueError("Symlinked notes are not supported")
+
+        target = candidate.resolve()
+        if target == vault:
+            raise ValueError("Path is the vault root")
+        if not target.is_relative_to(vault):
+            raise ValueError("Path is outside the Obsidian vault")
+        if target.is_dir():
+            raise ValueError("Path is a directory, not a note")
+        if target.suffix.lower() != ".md":
+            raise ValueError("Only .md notes can be deleted")
+
+        rel_path = str(target.relative_to(vault))
+        if Config.is_blacklisted(rel_path, str(target)):
+            raise ValueError(f"Path is blacklisted: {rel_path}")
+        return target
+
+    def find_note_path_by_supabase_id(self, thought_ids) -> Optional[Path]:
+        """Find the current path of a note by its frontmatter supabase_id.
+
+        Used only when a row's stored path is stale after a move. Returns
+        exactly one match; raises if multiple files share the id (a copy).
+        """
+        wanted = {str(i) for i in thought_ids}
+        vault = self.vault_path.resolve()
+        matches = []
+        for md_file in vault.rglob("*.md"):
+            try:
+                rel = str(md_file.relative_to(vault))
+            except ValueError:
+                continue
+            if Config.is_blacklisted(rel, str(md_file)):
+                continue
+            try:
+                fm = self._extract_frontmatter(
+                    md_file.read_text(encoding="utf-8"), rel
+                )
+            except Exception:
+                continue
+            if str(fm.get("supabase_id")) in wanted:
+                matches.append(md_file)
+
+        if len(matches) > 1:
+            paths = ", ".join(str(m.relative_to(vault)) for m in matches)
+            raise ValueError(
+                "Multiple files share this supabase_id; refusing to guess: "
+                + paths
+            )
+        return matches[0] if matches else None
+
+    async def delete_note_file(
+        self,
+        obsidian_path: str,
+        permanent: bool = False,
+        manifest_extra: Optional[Dict] = None,
+    ) -> Dict:
+        """Delete a note file, moving it to the configured trash by default."""
+        target = self.resolve_note_path(obsidian_path)
+        if not target.is_file():
+            return {"action": "missing", "path": obsidian_path}
+
+        if permanent:
+            target.unlink()
+            return {"action": "permanently_deleted", "path": obsidian_path}
+
+        if not Config.DELETE_TRASH_DIR:
+            raise ValueError("DELETE_TRASH_DIR is not configured")
+
+        vault = self.vault_path.resolve()
+        trash_root = Path(Config.DELETE_TRASH_DIR).resolve()
+        if trash_root == vault:
+            raise ValueError("DELETE_TRASH_DIR cannot be the vault root")
+        if trash_root.is_relative_to(vault):
+            rel_trash = str(trash_root.relative_to(vault))
+            if not Config.is_blacklisted(rel_trash, str(trash_root)):
+                raise ValueError(
+                    "A trash directory inside the vault must be "
+                    f"blacklisted/excluded (got: {rel_trash})"
+                )
+
+        rel = target.relative_to(vault)
+        dest = trash_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.is_dir():
+            dest = dest / target.name
+        if dest.exists():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            dest = dest.with_name(f"{dest.stem}-{stamp}{dest.suffix}")
+
+        shutil.move(str(target), str(dest))
+        if target.exists() or not dest.exists():
+            raise RuntimeError("File move did not complete")
+
+        manifest = {
+            "deleted_at": datetime.now().isoformat(),
+            "obsidian_path": str(rel),
+            "trash_path": str(dest),
+        }
+        if manifest_extra:
+            manifest.update(manifest_extra)
+        manifest_path = dest.with_name(dest.name + ".deleted.json")
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        return {
+            "action": "moved_to_trash",
+            "path": str(rel),
+            "trash_path": str(dest),
+            "manifest_path": str(manifest_path),
+        }
 
     def _ensure_folder_exists(self, folder_path: str):
         """Create folder path if it doesn't exist"""

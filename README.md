@@ -257,6 +257,7 @@ npx @modelcontextprotocol/inspector --cli venv/Scripts/python.exe second-brain-m
 - **hybrid_search**: Advanced search combining vector similarity + full-text search + filters
 - **list_recent**: List recent thoughts from both systems
 - **get_thought**: Get a specific thought by ID
+- **delete_note**: Delete a note from Supabase and Obsidian (dry run by default; moves the file to Obsidian's `.trash`)
 
 ### Search & Retrieval
 
@@ -316,6 +317,22 @@ Get a specific thought by ID.
 - `thought_id` (required): Thought ID
 
 **Returns:** Complete thought details
+
+### delete_note
+Delete a note from both Supabase and the Obsidian vault.
+
+**Safety:** dry run by default. Set `confirm=true` to delete. The file is moved to Obsidian's `.trash` unless `permanent=true` (permanent deletes require `ALLOW_PERMANENT_DELETE=true`).
+
+**Parameters:**
+- `thought_id` (optional): Supabase thought ID
+- `obsidian_path` (optional): Vault-relative path exactly as returned by search/get
+- `confirm` (default false): must be true to perform the delete
+- `permanent` (default false): unlink instead of moving to `.trash`
+- `reason` (optional): recorded in the trash manifest
+
+At least one of `thought_id` / `obsidian_path` is required. The tool refuses blacklisted paths and unindexed files, deletes all rows sharing the selected path, and repairs a stale stored path by locating the note through its frontmatter `supabase_id`.
+
+**Returns:** A preview (`dry_run: true`) or a result with the deleted IDs, file action, trash path, and DB verification.
 
 ### search_by_topic
 Search thoughts by specific topic.

@@ -53,6 +53,18 @@ class Config:
     # Obsidian Configuration
     OBSIDIAN_VAULT_PATH = os.getenv("OBSIDIAN_VAULT_PATH", "./SecondBrain")
 
+    # Deletion Configuration
+    # Deleted notes are moved to Obsidian's .trash by default. The directory is
+    # inside the vault but is blacklisted/excluded from indexing. An external
+    # path can be configured instead.
+    DELETE_TRASH_DIR = os.getenv(
+        "DELETE_TRASH_DIR",
+        str(Path(OBSIDIAN_VAULT_PATH).resolve() / ".trash"),
+    )
+    ALLOW_PERMANENT_DELETE = (
+        os.getenv("ALLOW_PERMANENT_DELETE", "false").lower() == "true"
+    )
+
     # Sync Configuration
     SYNC_ENABLED = os.getenv("SYNC_ENABLED", "true").lower() == "true"
     SYNC_DEBOUNCE_SECONDS = float(os.getenv("SYNC_DEBOUNCE_SECONDS", "2.0"))

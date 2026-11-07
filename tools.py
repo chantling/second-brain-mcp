@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from config import Config
 from database import DatabaseManager, transform_metadata_for_database
@@ -46,6 +47,7 @@ class ToolHandlers:
             "semantic_search": self.semantic_search,
             "list_recent": self.list_recent,
             "get_thought": self.get_thought,
+            "delete_note": self.delete_note,
             "search_by_topic": self.search_by_topic,
             "get_todos": self.get_todos,
             "find_recipes": self.find_recipes,
@@ -261,6 +263,341 @@ class ToolHandlers:
             return result
         except Exception as e:
             return {"error": str(e), "message": "Failed to get thought"}
+
+    async def delete_note(
+        self,
+        thought_id: Optional[int] = None,
+        obsidian_path: Optional[str] = None,
+        confirm: bool = False,
+        permanent: bool = False,
+        reason: str = "",
+    ) -> Dict:
+        """Delete a note from Supabase and the Obsidian vault.
+
+        Dry run by default. With confirm=true, the file is moved to the
+        configured trash (Obsidian's .trash unless overridden), the Supabase
+        row is deleted with its links and tag associations, and the result is
+        verified. Unindexed files are not deleted.
+        """
+        try:
+            # Some MCP clients send booleans as strings. Treat only explicit
+            # truthy strings as true so a stray "false" cannot delete a note.
+            if isinstance(confirm, str):
+                confirm = confirm.strip().lower() in ("1", "true", "yes", "on")
+            if isinstance(permanent, str):
+                permanent = permanent.strip().lower() in ("1", "true", "yes", "on")
+
+            if thought_id is None and not obsidian_path:
+                return {
+                    "success": False,
+                    "error": "Provide thought_id and/or obsidian_path",
+                }
+
+            row = None
+            if thought_id is not None:
+                try:
+                    thought_id = int(thought_id)
+                except (TypeError, ValueError):
+                    return {
+                        "success": False,
+                        "error": "thought_id must be an integer",
+                    }
+                row = await db_manager.get_thought(thought_id)
+                if not row:
+                    return {
+                        "success": False,
+                        "error": f"No thought found with id {thought_id}",
+                    }
+
+            supplied_path = None
+            by_path = None
+            if obsidian_path:
+                normalized = self._normalize_obsidian_path(obsidian_path)
+                by_path = await db_manager.get_thought_by_obsidian_path(
+                    normalized
+                )
+                if by_path is None:
+                    by_path = await db_manager.get_thought_by_obsidian_path(
+                        normalized.replace("\\", "/")
+                    )
+
+                if by_path is not None:
+                    if row is not None and row["id"] != by_path["id"]:
+                        return {
+                            "success": False,
+                            "error": (
+                                "thought_id and obsidian_path refer to "
+                                "different rows"
+                            ),
+                        }
+                    row = row or by_path
+                else:
+                    # The note may have moved and the row still points at the
+                    # old path. Use the supplied file's frontmatter id.
+                    try:
+                        supplied_path = obsidian_manager.resolve_note_path(
+                            obsidian_path
+                        )
+                    except ValueError as path_error:
+                        if row is None:
+                            return {
+                                "success": False,
+                                "error": str(path_error),
+                            }
+                        supplied_path = None
+
+                    if supplied_path and supplied_path.is_file() and row is None:
+                        supplied_rel = str(
+                            supplied_path.relative_to(
+                                obsidian_manager.vault_path.resolve()
+                            )
+                        )
+                        content = supplied_path.read_text(encoding="utf-8")
+                        metadata = obsidian_manager._extract_frontmatter(
+                            content, supplied_rel
+                        )
+                        frontmatter_id = metadata.get("supabase_id")
+                        if frontmatter_id not in (None, ""):
+                            try:
+                                row = await db_manager.get_thought(
+                                    int(frontmatter_id)
+                                )
+                            except (TypeError, ValueError):
+                                row = None
+                            if row is None:
+                                return {
+                                    "success": False,
+                                    "error": (
+                                        "Note frontmatter points to missing "
+                                        f"thought id {frontmatter_id}"
+                                    ),
+                                }
+
+                    if row is None:
+                        return {
+                            "success": False,
+                            "error": (
+                                "No indexed note found at path: "
+                                f"{obsidian_path}"
+                            ),
+                            "message": (
+                                "The tool only deletes indexed notes. "
+                                "Search/get the note first."
+                            ),
+                        }
+
+            if row is None:
+                return {"success": False, "error": "No thought found"}
+
+            rel_path = row.get("obsidian_path") or ""
+
+            row_ids = [row["id"]]
+            if rel_path:
+                same_path_ids = await db_manager.get_thought_ids_by_obsidian_path(
+                    rel_path
+                )
+                if same_path_ids:
+                    row_ids = same_path_ids
+
+            # If both exist but point at different files, do not guess which
+            # one the caller meant.
+            if rel_path and supplied_path and supplied_path.is_file():
+                try:
+                    stored_target = obsidian_manager.resolve_note_path(rel_path)
+                except ValueError:
+                    stored_target = None
+                if (
+                    stored_target
+                    and stored_target.is_file()
+                    and stored_target.resolve() != supplied_path.resolve()
+                ):
+                    return {
+                        "success": False,
+                        "error": (
+                            "obsidian_path does not match the stored path; "
+                            "use the row's path or the same note"
+                        ),
+                    }
+
+            target = None
+            file_exists = False
+            frontmatter_id = None
+            stale_path_repaired = False
+
+            if rel_path:
+                target = obsidian_manager.resolve_note_path(rel_path)
+                file_exists = target.is_file()
+
+                if not file_exists:
+                    # Prefer an explicitly supplied current path.
+                    if supplied_path is None and obsidian_path:
+                        try:
+                            supplied_path = obsidian_manager.resolve_note_path(
+                                obsidian_path
+                            )
+                        except ValueError:
+                            supplied_path = None
+
+                    if supplied_path and supplied_path.is_file():
+                        supplied_rel = str(
+                            supplied_path.relative_to(
+                                obsidian_manager.vault_path.resolve()
+                            )
+                        )
+                        content = supplied_path.read_text(encoding="utf-8")
+                        supplied_fm = obsidian_manager._extract_frontmatter(
+                            content, supplied_rel
+                        )
+                        valid_ids = {str(tid) for tid in row_ids}
+                        if str(supplied_fm.get("supabase_id")) in valid_ids:
+                            target = supplied_path
+                            rel_path = supplied_rel
+                            file_exists = True
+                            stale_path_repaired = True
+
+                    # Otherwise scan by frontmatter id. This is O(vault files)
+                    # but only runs when the stored path is stale.
+                    if not file_exists:
+                        found = obsidian_manager.find_note_path_by_supabase_id(
+                            row_ids
+                        )
+                        if found:
+                            target = found
+                            rel_path = str(
+                                found.relative_to(
+                                    obsidian_manager.vault_path.resolve()
+                                )
+                            )
+                            file_exists = True
+                            stale_path_repaired = True
+
+            if file_exists:
+                content = target.read_text(encoding="utf-8")
+                metadata = obsidian_manager._extract_frontmatter(
+                    content, rel_path
+                )
+                frontmatter_id = metadata.get("supabase_id")
+                valid_frontmatter_ids = (
+                    {None, ""}
+                    | {str(tid) for tid in row_ids}
+                    | set(row_ids)
+                )
+                if frontmatter_id not in valid_frontmatter_ids:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Frontmatter supabase_id does not match the "
+                            "database row"
+                        ),
+                        "thought_id": row["id"],
+                        "obsidian_path": rel_path,
+                        "frontmatter_id": frontmatter_id,
+                    }
+
+            preview = {
+                "thought_id": row["id"],
+                "thought_ids": row_ids,
+                "duplicate_rows": max(0, len(row_ids) - 1),
+                "obsidian_path": rel_path,
+                "absolute_path": str(target) if target else None,
+                "row_exists": True,
+                "file_exists": file_exists,
+                "frontmatter_id": frontmatter_id,
+                "stale_path_repaired": stale_path_repaired,
+                "permanent": permanent,
+            }
+
+            if not confirm:
+                return {
+                    "success": True,
+                    "dry_run": True,
+                    "note": preview,
+                    "message": (
+                        "Dry run only. Re-run with confirm=true to delete."
+                    ),
+                }
+
+            if permanent and not Config.ALLOW_PERMANENT_DELETE:
+                return {
+                    "success": False,
+                    "error": (
+                        "Permanent deletes are disabled. Set "
+                        "ALLOW_PERMANENT_DELETE=true or use permanent=false."
+                    ),
+                }
+
+            if stale_path_repaired:
+                await db_manager.update_obsidian_path(row["id"], rel_path)
+
+            file_result = {"action": "missing", "path": rel_path}
+            if file_exists:
+                file_result = await obsidian_manager.delete_note_file(
+                    rel_path,
+                    permanent=permanent,
+                    manifest_extra={
+                        "thought_id": row["id"],
+                        "thought_ids": row_ids,
+                        "file_hash": row.get("file_hash"),
+                        "reason": reason,
+                    },
+                )
+
+            for tid in row_ids:
+                await db_manager.delete_thought_by_id(tid)
+
+            still_exists = False
+            for tid in row_ids:
+                if await db_manager.thought_exists(tid):
+                    still_exists = True
+                    break
+            if still_exists:
+                await asyncio.sleep(0.5)
+                for tid in row_ids:
+                    await db_manager.delete_thought_by_id(tid)
+                still_exists = False
+                for tid in row_ids:
+                    if await db_manager.thought_exists(tid):
+                        still_exists = True
+                        break
+
+            result = {
+                "success": not still_exists,
+                "deleted": {
+                    "thought_id": row["id"],
+                    "thought_ids": row_ids,
+                    "duplicate_rows_deleted": max(0, len(row_ids) - 1),
+                    "obsidian_path": rel_path,
+                    "stale_path_repaired": stale_path_repaired,
+                    "file_action": file_result.get("action"),
+                    "trash_path": file_result.get("trash_path"),
+                    "manifest_path": file_result.get("manifest_path"),
+                    "db_deleted": not still_exists,
+                },
+            }
+            if still_exists:
+                result["message"] = (
+                    "The file was deleted but the Supabase row is still "
+                    "present. The watcher/orphan cleanup will retry; re-run "
+                    "or check Supabase if it persists."
+                )
+            return result
+
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.error(f"[DELETE] delete_note failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Failed to delete note",
+            }
+
+    def _normalize_obsidian_path(self, path: str) -> str:
+        p = Path(path)
+        if p.is_absolute():
+            vault = obsidian_manager.vault_path.resolve()
+            p = p.resolve().relative_to(vault)
+        return str(p).replace("/", "\\")
 
     async def search_by_topic(self, topic: str, limit: int = 20) -> List[Dict]:
         """Search thoughts by specific topic"""
